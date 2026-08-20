@@ -70,6 +70,16 @@ from torchvision.transforms.functional import rgb_to_grayscale
 
 로 치환한다(이미 패치되어 있으면 아무것도 하지 않음).
 
+## Shrimp Task Manager MCP 연결 (선택, 로드맵 관리용)
+
+`.mcp.json`은 머신별 절대경로(mcp-shrimp-task-manager 클론 위치)를 담고 있어 git에 커밋하지 않는다(`.gitignore` 처리). 처음 설정할 때:
+
+```powershell
+cp .mcp.json.example .mcp.json
+```
+
+복사한 `.mcp.json`에서 `<mcp-shrimp-task-manager 클론 경로>`를 실제로 `mcp-shrimp-task-manager`를 clone+build한 경로로, `<이 저장소 절대경로>`를 이 저장소의 절대경로로 바꿔라. 이 파일이 없으면 Claude Code에서 `docs/roadmap.md`를 만든 Shrimp Task Manager 도구들을 쓸 수 없을 뿐, 나머지 개발(코드 작성/테스트)에는 영향 없다.
+
 ## 모듈 구조
 
 ```

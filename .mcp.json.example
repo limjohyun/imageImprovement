@@ -3,10 +3,10 @@
     "shrimp-task-manager": {
       "command": "node",
       "args": [
-        "C:\\Users\\ljohy\\workspace\\invoice-web\\mcp-shrimp-task-manager\\dist\\index.js"
+        "<mcp-shrimp-task-manager 클론 경로>/dist/index.js"
       ],
       "env": {
-        "DATA_DIR": "C:\\Users\\ljohy\\workspace\\imageImprovement\\shrimp_data",
+        "DATA_DIR": "<이 저장소 절대경로>/shrimp_data",
         "TEMPLATES_USE": "en",
         "ENABLE_GUI": "false"
       }
