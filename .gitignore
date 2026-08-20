@@ -1,0 +1,28 @@
+# 가상환경
+.venv/
+
+# Python 캐시/바이트코드
+__pycache__/
+*.pyc
+*.pyo
+
+# 패키징/빌드 산출물
+*.egg-info/
+build/
+dist/
+
+# 테스트/캐시
+.pytest_cache/
+.ruff_cache/
+
+# 환경변수 (Phase5 클라우드 백업 자격증명 등, 절대 커밋 금지)
+.env
+
+# Shrimp Task Manager 내부 데이터
+shrimp_data/
+
+# 에디터/OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
