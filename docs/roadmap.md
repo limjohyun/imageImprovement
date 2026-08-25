@@ -16,7 +16,7 @@
 | 3 | 텍스트 OCR 처리기 (OCR + OCRmyPDF) | TXT-1,2 | #2 | `3770f54b` | ✅ 완료 |
 | 4 | PDF 조립 최소 구현 (단순 병합) | PDF-1 | #3 | `c48f1148` | ✅ 완료 |
 | 5 | 최소 GUI (입력/미리보기/저장, 처리 파이프라인은 QThread로 실행해 UI 비블로킹 보장) | GUI-1,2,4 | #4 | `bce4fa7d` | ✅ 완료 |
-| 6 | 텍스트 검수 UI | TXT-3 | #5 | `40e5540c` | ⬜ 대기 |
+| 6 | 텍스트 검수 UI | TXT-3 | #5 | `40e5540c` | ✅ 완료 |
 | 7 | Phase1 End-to-End 검증 | §9 Phase1 | #6 | `185b6d07` | ⬜ 대기 |
 
 `#1b`은 Phase1-2보다 먼저 실행되고 이후 모든 task가 선형/분기 체인으로 그 뒤를 잇기 때문에, 표에 나온 다른 task들이 fixture를 명시적으로 다시 의존성에 걸지 않아도 이미 사용 가능한 상태로 실행된다(전이적 의존).
@@ -134,6 +134,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 구현: `app/gui/worker.py`(`ProcessingWorker`, `QThread` 상속 — 텍스트 파이프라인(전처리+OCR+PDF 병합)을 별도 스레드에서 실행하고 진행률/페이지 결과/에러를 시그널로 전달, 커스텀 `finished`를 두지 않고 QThread 내장 시그널을 그대로 사용해 `qtbot.waitSignal(worker.finished, ...)` 패턴과 충돌 없게 함), `app/gui/main_window.py`(`MainWindow` — 폴더/파일 선택(GUI-1), 원본/처리 결과 나란히 미리보기(GUI-2, `pymupdf`로 PDF 첫 페이지 렌더링), PDF로 저장(GUI-4)), `app/gui/__init__.py`/`__main__.py`(`python -m app.gui` 진입점).
 - `code-reviewer`가 검토해 HIGH 1건 발견: 폴더 스캔이 사전식 정렬(`page1, page10, page11, page2` 순)이라 PDF-1(입력 순서대로 병합) 요구사항이 조용히 깨질 수 있던 문제 — 자연 정렬(natural sort) 키를 도입해 `_add_image_paths`가 추가할 때마다 전체 목록을 재정렬하도록 수정하고 회귀 테스트 추가. MEDIUM 3건도 함께 수정: macOS AppleDouble(`._*`) 사이드카 파일이 폴더 스캔 필터를 통과해 배치 처리가 조용히 중단되던 문제(점(`.`)으로 시작하는 파일 제외), `closeEvent` 확인 문구가 "중단"이라고 안내하면서 실제로는 처리가 끝날 때까지 기다리던 문구/동작 불일치(문구를 실제 동작에 맞게 수정), 앱 종료 시 임시 작업 디렉터리(처리된 페이지 PDF 포함)가 정리되지 않아 PACS 스캔 등 민감 문서 사본이 시스템 temp에 남던 문제(`closeEvent`에 정리 로직 추가). LOW 2건(HEIC 미지원, `lang` 파라미터 미노출)은 Phase1 범위 밖/블로킹 아님으로 판단해 보류.
 - 최종 검증: `pytest -q` → 63 passed, 2 skipped(MuseScore 미설치, 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase1-6: 텍스트 검수 UI — 완료
+
+- `python-dev-expert`가 구현: `MainWindow`에 텍스트 검수 패널(`text_review_edit`, `QPlainTextEdit`) 추가. 페이지 선택 시 `_refresh_text_review`가 해당 `PageResult.text`를 채우고(미처리 페이지는 비활성화), 사용자가 편집하면 `_on_review_text_changed`가 `textChanged` 시그널로 즉시 `PageResult.text`(mutable dataclass)에 반영. PDF 텍스트 레이어 재생성(OCRmyPDF 재실행)은 의도적으로 범위 밖으로 남김(TXT-3 수용 기준은 "확인/수정"이지 "PDF 재반영"이 아님).
+- `qa-test-engineer`가 `tests/gui/test_main_window.py`에 테스트 6개 추가(미선택/미처리 시 비활성화, 처리 후 텍스트 채움, 편집 즉시 반영과 페이지 전환 후 유실 없음 확인, 재처리 시 패널 초기화, 실제 파이프라인으로 OCR 텍스트 채움 검증).
+- `code-reviewer`가 검토해 MEDIUM 1건 발견: 검수 중인 텍스트 수정 내용은 메모리에만 있는데(파일로 저장되지 않음) 재처리("처리 시작" 재클릭) 시 경고 없이 사라지던 문제 — `_results_by_input`가 비어있지 않을 때 확인 대화상자를 추가해 해결. LOW 2건도 함께 수정: `blockSignals(True)/(False)` 수동 쌍이 예외 시 위젯을 영구히 신호 차단 상태로 남길 수 있던 문제(`QSignalBlocker` 컨텍스트 매니저로 교체), 재처리 시 초기화 문구가 실제 선택 상태와 안 맞던 문제(`_reset_text_review_panel`이 현재 선택된 페이지가 있으면 `_refresh_text_review`로 위임해 정확한 문구를 재사용하도록 정리).
+- 최종 검증: `pytest -q` → 68 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 

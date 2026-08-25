@@ -2,12 +2,15 @@
 
 레이아웃은 단순하게 세 영역으로 나눈다:
   - 상단: 입력(폴더/파일 선택)·처리 시작·저장 버튼
-  - 중단: 왼쪽 입력 파일 목록, 오른쪽 원본/처리 결과 나란히 보기
+  - 중단: 왼쪽 입력 파일 목록, 오른쪽 원본/처리 결과/인식된 텍스트 검수 패널
   - 하단: 진행 상태 텍스트
 
-Phase1-6(TXT-3 텍스트 검수 UI)은 이 위젯 구조 위에 "선택된 페이지의 OCR 텍스트를
-보여주고 수정하는" 패널만 추가하면 되도록, 처리 결과(`PageResult.text` 포함)를
-`_results_by_input`에 이미 보관해둔다.
+Phase1-6(TXT-3 텍스트 검수 UI): 선택된 페이지의 OCR 텍스트(`PageResult.text`)를
+편집 가능한 `QPlainTextEdit`에 보여주고, 사용자가 수정하면 즉시(`textChanged`)
+해당 `PageResult.text`에 반영한다. `PageResult`는 일반 `@dataclass`(mutable)라
+필드를 직접 덮어써도 `_results_by_input`에 보관된 같은 객체를 가리키므로 별도의
+"커밋" 단계 없이 실시간으로 데이터가 유지된다. PDF의 OCR 텍스트 레이어 재생성은
+Phase1 범위 밖이다(수용 기준은 "확인/수정"이지 "PDF 재반영"이 아님).
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import tempfile
 from pathlib import Path
 
 import pymupdf
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QPixmap
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -30,6 +33,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -79,6 +83,8 @@ class MainWindow(QMainWindow):
         self._work_dir: Path | None = None
         self._results_by_input: dict[str, PageResult] = {}
         self._merged_pdf_path: Path | None = None
+        self._reviewed_input_path: Path | None = None
+        """텍스트 검수 위젯이 현재 어느 입력 파일의 결과를 보여주고 있는지 (수정 반영 대상)."""
 
         self._build_ui()
 
@@ -133,7 +139,21 @@ class MainWindow(QMainWindow):
         preview_layout.addWidget(self._build_preview_group("처리 결과", "processed_preview_label"))
         layout.addLayout(preview_layout, stretch=2)
 
+        layout.addWidget(self._build_text_review_group(), stretch=1)
+
         return layout
+
+    def _build_text_review_group(self) -> QGroupBox:
+        """TXT-3: 선택된 페이지의 OCR 인식 텍스트를 확인/수정하는 패널."""
+        group = QGroupBox("인식된 텍스트")
+        group_layout = QVBoxLayout(group)
+        text_edit = QPlainTextEdit()
+        text_edit.setPlaceholderText("페이지를 선택하세요.")
+        text_edit.setEnabled(False)
+        text_edit.textChanged.connect(self._on_review_text_changed)
+        group_layout.addWidget(text_edit)
+        self.text_review_edit = text_edit
+        return group
 
     def _build_preview_group(self, title: str, label_attr: str) -> QGroupBox:
         group = QGroupBox(title)
@@ -228,6 +248,18 @@ class MainWindow(QMainWindow):
         if self._worker is not None and self._worker.isRunning():
             QMessageBox.warning(self, "처리 중", "이미 처리가 진행 중입니다.")
             return
+        if self._results_by_input:
+            # 검수 패널에서 수정한 텍스트는 파일로 저장되지 않고 메모리(PageResult)에만
+            # 있으므로, 재처리로 이전 결과를 지우기 전에 사용자에게 확인을 받는다.
+            reply = QMessageBox.question(
+                self,
+                "다시 처리",
+                "이전 처리 결과와 검수 중인 텍스트 수정 내용이 모두 사라집니다. 다시 처리할까요?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
 
         self._results_by_input.clear()
         self._merged_pdf_path = None
@@ -235,6 +267,7 @@ class MainWindow(QMainWindow):
         self._set_input_controls_enabled(False)
         self.processed_preview_label.setText("아직 처리되지 않았습니다.")
         self.processed_preview_label.setPixmap(QPixmap())
+        self._reset_text_review_panel()
 
         if self._work_dir is not None:
             # 재처리 시 이전 실행의 임시 작업 디렉터리가 계속 쌓이지 않도록 정리한다.
@@ -287,6 +320,7 @@ class MainWindow(QMainWindow):
         path = Path(items[0].data(_PATH_ROLE))
         self._show_original_preview(path)
         self._refresh_processed_preview(path)
+        self._refresh_text_review(path)
 
     def _refresh_preview_if_selected(self, input_path: Path) -> None:
         items = self.file_list_widget.selectedItems()
@@ -295,6 +329,7 @@ class MainWindow(QMainWindow):
         selected_path = Path(items[0].data(_PATH_ROLE))
         if selected_path.resolve() == input_path.resolve():
             self._refresh_processed_preview(selected_path)
+            self._refresh_text_review(selected_path)
 
     def _show_original_preview(self, path: Path) -> None:
         pixmap = QPixmap(str(path))
@@ -327,6 +362,53 @@ class MainWindow(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation,
             )
         )
+
+    # ------------------------------------------------------------------
+    # TXT-3: 텍스트 검수
+    # ------------------------------------------------------------------
+
+    def _refresh_text_review(self, path: Path) -> None:
+        """선택된 페이지의 OCR 텍스트를 검수 위젯에 채운다. 미처리 페이지는 빈 상태로 둔다."""
+        result = self._results_by_input.get(str(path.resolve()))
+        self._reviewed_input_path = path
+        # setPlainText가 textChanged를 다시 발생시켜 다른 페이지의 텍스트로
+        # 되써지는 것을 막기 위해, 값을 채우는 동안은 시그널을 잠깐 막는다.
+        # `QSignalBlocker`는 예외가 나도 스코프를 벗어나며 자동으로 해제되므로
+        # blockSignals(True)/(False) 수동 쌍보다 안전하다.
+        with QSignalBlocker(self.text_review_edit):
+            if result is None:
+                self.text_review_edit.clear()
+                self.text_review_edit.setPlaceholderText("아직 처리되지 않았습니다.")
+                self.text_review_edit.setEnabled(False)
+            else:
+                self.text_review_edit.setPlainText(result.text)
+                self.text_review_edit.setEnabled(True)
+
+    def _reset_text_review_panel(self) -> None:
+        """새 배치 처리를 시작할 때 검수 패널을 초기화한다.
+
+        현재 선택된 페이지가 있으면 `_refresh_text_review`로 위임해 "아직
+        처리되지 않았습니다" 상태를 보여주고(선택은 유지되므로 이쪽이 더 정확한
+        문구다), 선택된 페이지가 없으면 안내 문구만 되돌린다.
+        """
+        items = self.file_list_widget.selectedItems()
+        if items:
+            self._refresh_text_review(Path(items[0].data(_PATH_ROLE)))
+            return
+        self._reviewed_input_path = None
+        with QSignalBlocker(self.text_review_edit):
+            self.text_review_edit.clear()
+            self.text_review_edit.setPlaceholderText("페이지를 선택하세요.")
+            self.text_review_edit.setEnabled(False)
+
+    def _on_review_text_changed(self) -> None:
+        """사용자가 텍스트를 수정하면 해당 페이지의 `PageResult.text`에 실시간으로 반영한다."""
+        if self._reviewed_input_path is None:
+            return
+        result = self._results_by_input.get(str(self._reviewed_input_path.resolve()))
+        if result is None:
+            return
+        result.text = self.text_review_edit.toPlainText()
 
     # ------------------------------------------------------------------
     # GUI-4: 내보내기
