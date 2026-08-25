@@ -17,7 +17,7 @@
 | 4 | PDF 조립 최소 구현 (단순 병합) | PDF-1 | #3 | `c48f1148` | ✅ 완료 |
 | 5 | 최소 GUI (입력/미리보기/저장, 처리 파이프라인은 QThread로 실행해 UI 비블로킹 보장) | GUI-1,2,4 | #4 | `bce4fa7d` | ✅ 완료 |
 | 6 | 텍스트 검수 UI | TXT-3 | #5 | `40e5540c` | ✅ 완료 |
-| 7 | Phase1 End-to-End 검증 | §9 Phase1 | #6 | `185b6d07` | ⬜ 대기 |
+| 7 | Phase1 End-to-End 검증 | §9 Phase1 | #6 | `185b6d07` | ✅ 완료 |
 
 `#1b`은 Phase1-2보다 먼저 실행되고 이후 모든 task가 선형/분기 체인으로 그 뒤를 잇기 때문에, 표에 나온 다른 task들이 fixture를 명시적으로 다시 의존성에 걸지 않아도 이미 사용 가능한 상태로 실행된다(전이적 의존).
 
@@ -141,6 +141,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `qa-test-engineer`가 `tests/gui/test_main_window.py`에 테스트 6개 추가(미선택/미처리 시 비활성화, 처리 후 텍스트 채움, 편집 즉시 반영과 페이지 전환 후 유실 없음 확인, 재처리 시 패널 초기화, 실제 파이프라인으로 OCR 텍스트 채움 검증).
 - `code-reviewer`가 검토해 MEDIUM 1건 발견: 검수 중인 텍스트 수정 내용은 메모리에만 있는데(파일로 저장되지 않음) 재처리("처리 시작" 재클릭) 시 경고 없이 사라지던 문제 — `_results_by_input`가 비어있지 않을 때 확인 대화상자를 추가해 해결. LOW 2건도 함께 수정: `blockSignals(True)/(False)` 수동 쌍이 예외 시 위젯을 영구히 신호 차단 상태로 남길 수 있던 문제(`QSignalBlocker` 컨텍스트 매니저로 교체), 재처리 시 초기화 문구가 실제 선택 상태와 안 맞던 문제(`_reset_text_review_panel`이 현재 선택된 페이지가 있으면 `_refresh_text_review`로 위임해 정확한 문구를 재사용하도록 정리).
 - 최종 검증: `pytest -q` → 68 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase1-7: Phase1 End-to-End 검증 — 완료 (Phase1 전체 완료)
+
+- `qa-test-engineer`가 `tests/gui/test_e2e_phase1.py`에 §9 Phase1 수용 기준("왜곡·저해상도 샘플 이미지 1장을 입력해 검색 가능한 PDF가 생성되는지")을 검증하는 end-to-end 테스트를 작성. `synthetic_text_photo`(원근왜곡+조명그라디언트+카메라노이즈+다운샘플 합성)를 입력으로 실제 `MainWindow`를 통해 입력(GUI-1)→백그라운드 처리(QThread)→미리보기(GUI-2)→텍스트 검수(TXT-3)→저장(GUI-4)까지 한 흐름으로 잇고, 저장된 PDF를 다시 열어 텍스트 레이어가 원문과 유사도 0.7 이상이며 특정 단어가 실제로 검색됨을 확인(TXT-2 "검색 가능한 PDF" 실증).
+- 별도로 발견된 코드 결함 없음 — 테스트가 첫 실행에 통과.
+- 최종 검증: `pytest -q` → 69 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+- **Phase1(공통 전처리 + 텍스트 OCR + 최소 GUI) 전체 완료.** 다음은 Phase2(도형/그래프 처리 + 유형 라우팅) 착수.
 
 ## 다음 진행 방식
 
