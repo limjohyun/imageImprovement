@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A personal (non-distributed) Windows desktop tool that turns smartphone photos of documents/screens (PACS scans, lecture slide photos, sheet music) into cleaned-up PDFs. Full requirements live in `docs/prd.md`; the Phase-by-Phase implementation plan (generated from the PRD via Shrimp Task Manager) lives in `docs/roadmap.md` — **read both before making architectural decisions**. `docs/roadmap.md` also tracks live progress (a per-task status column); update it when a task's status changes.
+A personal (non-distributed) macOS desktop tool that turns smartphone (iPhone) photos of documents/screens (PACS scans, lecture slide photos, sheet music) into cleaned-up PDFs. Full requirements live in `docs/prd.md`; the Phase-by-Phase implementation plan (generated from the PRD via Shrimp Task Manager) lives in `docs/roadmap.md` — **read both before making architectural decisions**. `docs/roadmap.md` also tracks live progress (a per-task status column); update it when a task's status changes.
 
 The repo is in an early scaffolding state: `app/*` subpackages exist but are still empty. Follow `docs/roadmap.md`'s task order rather than inventing new structure.
 
@@ -12,31 +12,34 @@ The repo is in an early scaffolding state: `app/*` subpackages exist but are sti
 
 ### Environment setup (must be done in this exact order after recreating `.venv`)
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-.\.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv\Scripts\python.exe scripts\patch_basicsr.py
+Requires Python 3.12.x on PATH as `python3.12` (install via Homebrew `brew install python@3.12` or pyenv — this machine currently has neither Homebrew nor a 3.12 interpreter installed, only system Python 3.13).
+
+```bash
+python3.12 -m venv .venv
+./.venv/bin/python -m pip install torch==2.13.0
+./.venv/bin/python -m pip install -e ".[dev]"
+./.venv/bin/python scripts/patch_basicsr.py
 ```
 
 - **Python must be 3.12.x** (`requires-python = ">=3.12,<3.13"` in `pyproject.toml`). Python 3.13 breaks `basicsr` at install time because PEP 667 changed `locals()` semantics that `basicsr`'s old `exec()`-based version detection relies on — this was reproduced directly, not theoretical.
-- `torch` must come from the CPU-only index *before* the main `pip install -e ".[dev]"`, otherwise pip will pull the default (CUDA) build from PyPI on the next install.
+- On macOS there's no CUDA build to accidentally pull in, so `torch` installs straight from the default PyPI index (the CPU-only-index trick from the original Windows setup doesn't apply here — PyPI's macOS wheels are already CPU/MPS-only).
 - `scripts/patch_basicsr.py` is required every time `.venv` is recreated: modern `torchvision` removed `torchvision.transforms.functional_tensor`, which `basicsr==1.4.2` still imports. The script is idempotent — safe to re-run.
 - Dependencies in `pyproject.toml` are pinned to exact versions on purpose (this stack has already broken once from version drift). Only add a new dependency when the roadmap task that needs it starts — don't pre-install Phase2/3/5 packages (`vtracer`, `oemer`, `supabase-py`, …) early.
+- External binaries (Tesseract, Ghostscript, qpdf, MuseScore — see below) install via `brew install tesseract ghostscript qpdf` / `brew install --cask musescore` when needed, gated by Phase like everything else.
 
 ### Test / lint
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest                              # all tests
-.\.venv\Scripts\python.exe -m pytest tests/path/test_x.py::test_y  # single test
-.\.venv\Scripts\python.exe -m ruff check .
+```bash
+./.venv/bin/python -m pytest                              # all tests
+./.venv/bin/python -m pytest tests/path/test_x.py::test_y  # single test
+./.venv/bin/python -m ruff check .
 ```
 
 GUI tests use `pytest-qt`; run headless with `QT_QPA_PLATFORM=offscreen` when there's no display.
 
 ### Shrimp Task Manager (MCP)
 
-`.mcp.json` is git-ignored (it hardcodes a local absolute path to the `mcp-shrimp-task-manager` build). Copy `.mcp.json.example` → `.mcp.json` and fill in the real paths to use it. It's optional for coding/testing — only needed for regenerating/updating `docs/roadmap.md`'s task graph.
+`.mcp.json` is git-ignored (it hardcodes a machine-local absolute path for `DATA_DIR`). Copy `.mcp.json.example` → `.mcp.json` and fill in the real path to use it; the server itself runs via `npx -y mcp-shrimp-task-manager` (published to npm), no local clone/build required. It's optional for coding/testing — only needed for regenerating/updating `docs/roadmap.md`'s task graph.
 
 ## Architecture
 

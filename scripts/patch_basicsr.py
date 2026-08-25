@@ -4,7 +4,7 @@
 삭제되어 basicsr==1.4.2의 `degradations.py`가 import 시점에 깨진다.
 venv를 재생성하면 이 패치도 함께 사라지므로, 재생성 후 이 스크립트를 다시 실행한다.
 
-사용법: .venv\\Scripts\\python.exe scripts\\patch_basicsr.py
+사용법: .venv/bin/python scripts/patch_basicsr.py
 """
 
 from __future__ import annotations

@@ -1,9 +1,10 @@
 {
   "mcpServers": {
     "shrimp-task-manager": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "<mcp-shrimp-task-manager 클론 경로>/dist/index.js"
+        "-y",
+        "mcp-shrimp-task-manager"
       ],
       "env": {
         "DATA_DIR": "<이 저장소 절대경로>/shrimp_data",

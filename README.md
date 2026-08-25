@@ -6,35 +6,37 @@
 
 ## 개발 환경
 
-- Python **3.12.x** 필수 (3.13 이상 미지원 — 아래 "알려진 이슈" 참고)
+- OS: macOS
+- Python **3.12.x** 필수 (3.13 이상 미지원 — 아래 "알려진 이슈" 참고). Homebrew(`brew install python@3.12`) 또는 pyenv로 설치.
 
-### venv 활성화
+### venv 생성/활성화
 
-```powershell
-.\.venv\Scripts\Activate.ps1
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
 ```
 
 ### 테스트 실행
 
-```powershell
-.\.venv\Scripts\python.exe -m pytest
+```bash
+.venv/bin/python -m pytest
 ```
 
 ### 린트
 
-```powershell
-.\.venv\Scripts\python.exe -m ruff check .
+```bash
+.venv/bin/python -m ruff check .
 ```
 
 ## 설치 (venv 재생성 시 아래 순서 그대로)
 
-```powershell
-.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-.venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv\Scripts\python.exe scripts\patch_basicsr.py
+```bash
+.venv/bin/python -m pip install torch==2.13.0
+.venv/bin/python -m pip install -e ".[dev]"
+.venv/bin/python scripts/patch_basicsr.py
 ```
 
-torch를 먼저 CPU 전용 인덱스(`https://download.pytorch.org/whl/cpu`)에서 설치하는 이유: PyPI 기본 인덱스에는 `torch==2.13.0+cpu` 같은 로컬 버전(CPU 빌드)이 없고, 순서를 지키지 않으면 이후 `pip install -e ".[dev]"` 단계에서 torch가 기본 인덱스의 (용량이 훨씬 큰) CUDA 빌드로 다시 설치될 수 있다.
+macOS에는 CUDA 빌드 자체가 없어서(Windows/Linux처럼 별도 CPU 전용 인덱스를 지정할 필요 없이) 기본 PyPI 인덱스에서 설치해도 자동으로 CPU/MPS 전용 빌드가 설치된다.
 
 ## 알려진 이슈 / venv 재생성 시 필요한 작업
 
@@ -52,8 +54,8 @@ ModuleNotFoundError: No module named 'torchvision.transforms.functional_tensor'
 
 `.venv`를 새로 만든 뒤(즉 `basicsr`를 재설치한 뒤) 아래 스크립트를 한 번 실행해 패치를 다시 적용한다.
 
-```powershell
-.\.venv\Scripts\python.exe scripts\patch_basicsr.py
+```bash
+.venv/bin/python scripts/patch_basicsr.py
 ```
 
 이 스크립트는 `basicsr/data/degradations.py`의
@@ -72,13 +74,13 @@ from torchvision.transforms.functional import rgb_to_grayscale
 
 ## Shrimp Task Manager MCP 연결 (선택, 로드맵 관리용)
 
-`.mcp.json`은 머신별 절대경로(mcp-shrimp-task-manager 클론 위치)를 담고 있어 git에 커밋하지 않는다(`.gitignore` 처리). 처음 설정할 때:
+`.mcp.json`은 머신별 절대경로(`DATA_DIR`)를 담고 있어 git에 커밋하지 않는다(`.gitignore` 처리). 처음 설정할 때:
 
-```powershell
+```bash
 cp .mcp.json.example .mcp.json
 ```
 
-복사한 `.mcp.json`에서 `<mcp-shrimp-task-manager 클론 경로>`를 실제로 `mcp-shrimp-task-manager`를 clone+build한 경로로, `<이 저장소 절대경로>`를 이 저장소의 절대경로로 바꿔라. 이 파일이 없으면 Claude Code에서 `docs/roadmap.md`를 만든 Shrimp Task Manager 도구들을 쓸 수 없을 뿐, 나머지 개발(코드 작성/테스트)에는 영향 없다.
+복사한 `.mcp.json`에서 `<이 저장소 절대경로>`를 이 저장소의 절대경로로 바꿔라. 서버 자체는 npm에 배포된 `mcp-shrimp-task-manager`를 `npx -y mcp-shrimp-task-manager`로 실행하므로 별도 clone/build가 필요 없다. 이 파일이 없으면 Claude Code에서 `docs/roadmap.md`를 만든 Shrimp Task Manager 도구들을 쓸 수 없을 뿐, 나머지 개발(코드 작성/테스트)에는 영향 없다.
 
 ## 모듈 구조
 
