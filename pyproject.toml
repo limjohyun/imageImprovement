@@ -36,6 +36,9 @@ dev = [
     "pytest==9.1.1",
     "pytest-qt==4.5.0",
     "ruff==0.16.3",
+    # 합성 악보 fixture(tests/fixtures/synthetic.py) 생성용. 실제 엔그레이빙 렌더링은
+    # MuseScore(Phase3에서 설치 예정) 실행 파일이 있을 때만 동작하고, 없으면 skip된다.
+    "music21==10.5.0",
 ]
 
 [tool.setuptools.packages.find]

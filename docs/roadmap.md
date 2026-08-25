@@ -11,7 +11,7 @@
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
 | 1 | 프로젝트 스캐폴딩 (git init, venv, 폴더구조, pytest) | — | 없음 | `954d8b88` | ✅ 완료 |
-| 1b | 합성 테스트 픽스처 생성 유틸리티 (텍스트/도형/악보 왜곡 이미지 코드로 생성) | — | #1 | `ef4c4c61` | ⬜ 대기 |
+| 1b | 합성 테스트 픽스처 생성 유틸리티 (텍스트/도형/악보 왜곡 이미지 코드로 생성) | — | #1 | `ef4c4c61` | ✅ 완료 |
 | 2 | 공통 전처리 파이프라인 (원근보정/deskew/조명보정/업스케일) | PRE-1~5 | #1, #1b | `00a177ec` | ⬜ 대기 |
 | 3 | 텍스트 OCR 처리기 (OCR + OCRmyPDF) — ⚠️Ghostscript 설치 필요(착수 직전, Tesseract/qpdf는 설치완료) | TXT-1,2 | #2 | `3770f54b` | ⬜ 대기 |
 | 4 | PDF 조립 최소 구현 (단순 병합) | PDF-1 | #3 | `c48f1148` | ⬜ 대기 |
@@ -112,6 +112,15 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 문서를 `docs/`로 재구성(`prd.md`, `roadmap.md` → `docs/`)하고 `README.md`·`.claude/agents/*.md`의 참조 경로 갱신.
 - `git commit` + `git push`로 GitHub(`origin/main`)에 반영 완료.
 - 남겨둔 참고사항(조치 안 함): `.mcp.json`에 다른 워크스페이스(`invoice-web`)의 절대경로가 하드코딩된 채 커밋됨 — 비밀정보는 아니지만 다른 컴퓨터에서 클론하면 Shrimp 연결이 깨짐.
+
+### ✅ Phase1-1b: 합성 테스트 픽스처 생성 유틸리티 — 완료
+
+- **환경 전환**: 이 태스크부터 개발 환경을 Windows에서 **macOS**로 전환함(사용자 결정 — 아이폰으로 촬영한 사진을 다루므로 macOS에서 계속 진행). Homebrew 설치 → `python@3.12`/`tesseract`/`ghostscript`/`qpdf` 설치 → `.venv` 재생성 → `pip install -e ".[dev]"` → `scripts/patch_basicsr.py` 전부 재검증 완료(`pytest`/`ruff` 통과). `CLAUDE.md`/`README.md`/`docs/prd.md`의 Windows 전용 안내(PowerShell 명령, "(Windows)" 표기 등)를 macOS 기준으로 갱신함. Ghostscript는 Windows에서는 winget에 없어 미설치였으나, macOS에서는 Homebrew로 정상 설치됨(Phase1-3의 ⚠️ 표시는 이제 해소된 상태).
+- Shrimp Task Manager MCP는 `npx -y mcp-shrimp-task-manager` 방식으로 이 macOS 머신에 새로 연결함(로컬 clone/build 불필요). 다만 이전 Windows 머신의 `shrimp_data/`(git-ignore 대상)는 옮겨오지 않아 태스크 그래프가 비어 있음 — 사용자 결정에 따라 Shrimp에 태스크를 재구성하지 않고 이 `docs/roadmap.md` 스냅샷을 기준으로 계속 진행하기로 함.
+- `python-dev-expert`가 구현: `tests/fixtures/synthetic.py`(텍스트/도형은 PIL/OpenCV로 렌더링 후 원근왜곡+조명그라디언트+가우시안노이즈+다운샘플 합성, 악보는 music21로 MusicXML 작성 후 MuseScore CLI로 엔그레이빙 PNG 렌더링), `tests/fixtures/test_synthetic.py`(스모크 테스트), `tests/conftest.py`(pytest fixture로 wrapping). `pyproject.toml` dev 의존성에 `music21==10.5.0` 추가.
+- 악보 fixture는 MuseScore가 없으면(`find_musescore_executable()`이 `None` 반환) `ScoreRendererUnavailableError` → `pytest.skip`으로 우아하게 건너뛰도록 설계함. 이 머신에는 아직 MuseScore가 설치돼 있지 않아(Phase3 착수 전까지 의도적으로 보류) 현재 이 fixture는 skip 상태.
+- `code-reviewer`가 검토: HIGH/MEDIUM 이슈 없음. LOW 3건 중 "MuseScore 없이 skip되는 경로라 music21 MusicXML 생성 로직 자체가 pytest에서 exercise 안 됨" 1건을 반영해 `_build_synthetic_score()` 단독 스모크 테스트(`test_build_synthetic_score_produces_well_formed_musicxml`)를 추가함. 나머지 2건(왜곡 판정 테스트의 약한 assertion, macOS 마이그레이션 문서 변경과 커밋 분리 필요)은 blocking 아님으로 판단해 참고만 하고 넘어감.
+- 최종 검증: `./.venv/bin/python -m pytest -q` → 7 passed, 1 skipped(MuseScore 미설치, 의도된 결과). `./.venv/bin/python -m ruff check .` → 통과.
 
 ## 다음 진행 방식
 
