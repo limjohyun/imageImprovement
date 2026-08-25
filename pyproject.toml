@@ -46,6 +46,9 @@ include = ["app*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: 무거운 ML 추론 등 실행 시간이 긴 테스트 (기본 실행 대상에서 배제하지 않음, 필요 시 -m 'not slow'로 제외)",
+]
 
 [tool.ruff]
 line-length = 100
