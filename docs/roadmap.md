@@ -15,7 +15,7 @@
 | 2 | 공통 전처리 파이프라인 (원근보정/deskew/조명보정/업스케일) | PRE-1~5 | #1, #1b | `00a177ec` | ✅ 완료 |
 | 3 | 텍스트 OCR 처리기 (OCR + OCRmyPDF) | TXT-1,2 | #2 | `3770f54b` | ✅ 완료 |
 | 4 | PDF 조립 최소 구현 (단순 병합) | PDF-1 | #3 | `c48f1148` | ✅ 완료 |
-| 5 | 최소 GUI (입력/미리보기/저장, 처리 파이프라인은 QThread로 실행해 UI 비블로킹 보장) | GUI-1,2,4 | #4 | `bce4fa7d` | ⬜ 대기 |
+| 5 | 최소 GUI (입력/미리보기/저장, 처리 파이프라인은 QThread로 실행해 UI 비블로킹 보장) | GUI-1,2,4 | #4 | `bce4fa7d` | ✅ 완료 |
 | 6 | 텍스트 검수 UI | TXT-3 | #5 | `40e5540c` | ⬜ 대기 |
 | 7 | Phase1 End-to-End 검증 | §9 Phase1 | #6 | `185b6d07` | ⬜ 대기 |
 
@@ -128,6 +128,12 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 `app/processors/text.py` 구현: `extract_text`(TXT-1, pytesseract), `build_searchable_pdf`(TXT-2, img2pdf+OCRmyPDF), `process_image`/`process_image_file`(진입점). `app.preprocess.run_pipeline`을 그대로 재사용.
 - `code-reviewer`가 검토해 HIGH 1건 발견: `extract_text()`와 `build_searchable_pdf()`가 Tesseract를 각각 별도로 실행해 검수용 텍스트와 실제 PDF 텍스트 레이어가 미묘하게 달라지는 문제(재현 확인됨) — `ocrmypdf.ocr(..., sidecar=...)`로 한 번의 실행으로 통합해 해결. MEDIUM 1건: 한글 인식이 테스트에서 전혀 검증되지 않던 문제 — 사용자 확인 후 macOS 시스템 한글 폰트로 렌더링하는 fixture(`make_korean_text_photo`)를 추가해 실측 유사도 0.98 확인. LOW(유사도 임계값 완화, logger 미사용)도 함께 수정. 나머지 사소한 지적(Ghostscript degrade 시 문서 정합성)은 `docs/issue.md`에 기록.
 - 최종 검증: `pytest -q` → 48 passed, 2 skipped(MuseScore 미설치, 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase1-5: 최소 GUI — 완료
+
+- `python-dev-expert`가 구현: `app/gui/worker.py`(`ProcessingWorker`, `QThread` 상속 — 텍스트 파이프라인(전처리+OCR+PDF 병합)을 별도 스레드에서 실행하고 진행률/페이지 결과/에러를 시그널로 전달, 커스텀 `finished`를 두지 않고 QThread 내장 시그널을 그대로 사용해 `qtbot.waitSignal(worker.finished, ...)` 패턴과 충돌 없게 함), `app/gui/main_window.py`(`MainWindow` — 폴더/파일 선택(GUI-1), 원본/처리 결과 나란히 미리보기(GUI-2, `pymupdf`로 PDF 첫 페이지 렌더링), PDF로 저장(GUI-4)), `app/gui/__init__.py`/`__main__.py`(`python -m app.gui` 진입점).
+- `code-reviewer`가 검토해 HIGH 1건 발견: 폴더 스캔이 사전식 정렬(`page1, page10, page11, page2` 순)이라 PDF-1(입력 순서대로 병합) 요구사항이 조용히 깨질 수 있던 문제 — 자연 정렬(natural sort) 키를 도입해 `_add_image_paths`가 추가할 때마다 전체 목록을 재정렬하도록 수정하고 회귀 테스트 추가. MEDIUM 3건도 함께 수정: macOS AppleDouble(`._*`) 사이드카 파일이 폴더 스캔 필터를 통과해 배치 처리가 조용히 중단되던 문제(점(`.`)으로 시작하는 파일 제외), `closeEvent` 확인 문구가 "중단"이라고 안내하면서 실제로는 처리가 끝날 때까지 기다리던 문구/동작 불일치(문구를 실제 동작에 맞게 수정), 앱 종료 시 임시 작업 디렉터리(처리된 페이지 PDF 포함)가 정리되지 않아 PACS 스캔 등 민감 문서 사본이 시스템 temp에 남던 문제(`closeEvent`에 정리 로직 추가). LOW 2건(HEIC 미지원, `lang` 파라미터 미노출)은 Phase1 범위 밖/블로킹 아님으로 판단해 보류.
+- 최종 검증: `pytest -q` → 63 passed, 2 skipped(MuseScore 미설치, 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
