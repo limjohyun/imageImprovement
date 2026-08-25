@@ -25,3 +25,14 @@
   → sidecar 통합 리팩터링(High #1 수정)으로 `process_image()`가 더 이상 `extract_text()`를
   재호출하지 않게 되어 자연히 해소됨.
   (파일: `app/processors/text.py`)
+
+## Phase1-4 (PDF 조립 최소 구현)
+
+- [ ] **[사소]** `assemble_pdf`에서 `output_pdf.parent.mkdir(...)`이 각 입력 PDF의 페이지 수
+  검증(루프 안쪽)보다 먼저 실행돼, 루프 중간에 `ValueError`(0페이지 PDF 등)가 나도 출력
+  디렉터리는 이미 생성된 채로 남는다. 데이터 손상은 아니고 빈 디렉터리가 남는 부작용 수준.
+  (파일: `app/pdf_assembly/assemble.py`)
+- [ ] **[사소]** 존재하지 않는 경로와 "파일이 아닌 경로"(디렉터리 등)가 `path.is_file()`
+  검사 하나로 뭉뚱그려져 동일한 `FileNotFoundError` 메시지("PDF 파일을 찾을 수 없습니다")를
+  받는다. PRD 요구 시나리오(미존재 경로)는 충족하지만 디버깅 시 약간 혼동 소지.
+  (파일: `app/pdf_assembly/assemble.py`)
