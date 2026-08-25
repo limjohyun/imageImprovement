@@ -51,6 +51,10 @@ class ScoreRendererUnavailableError(RuntimeError):
     """MuseScore 등 악보 엔그레이빙 렌더러를 찾지 못했을 때 발생시킨다."""
 
 
+class KoreanFontUnavailableError(RuntimeError):
+    """한글 글리프를 지원하는 시스템 폰트를 찾지 못했을 때 발생시킨다."""
+
+
 # ---------------------------------------------------------------------------
 # 공통 왜곡 파이프라인 (텍스트/도형/악보 fixture가 모두 재사용)
 # ---------------------------------------------------------------------------
@@ -177,15 +181,58 @@ DEFAULT_TEXT_LINES = [
     "0123456789 ABCDEFGHIJ abcdefghij",
 ]
 
+# 한글+영문 혼용(lang="kor+eng") 인식을 검증하기 위한 fixture 문장.
+# PIL ImageFont.load_default()는 한글 글리프를 지원하지 않으므로, 이 문장을
+# 렌더링할 때는 반드시 시스템에 설치된 한글 지원 폰트(_render_text_document의
+# font_path 인자)를 함께 넘겨야 한다.
+DEFAULT_KOREAN_TEXT_LINES = [
+    "합성 픽스처 문서",
+    "빠른 갈색 여우가 게으른 개를 뛰어넘는다.",
+    "한글과 영어가 섞인 Phase 1 문서 인식 테스트입니다.",
+    "전화번호 010-1234-5678, 우편번호 06236",
+]
+
+# macOS에 기본 내장된 한글 지원 폰트 후보 (다른 macOS 머신에서도 최소 하나는
+# 있을 가능성이 높은 순서). 전부 없으면 호출자가 pytest.skip으로 건너뛰어야 한다.
+_KOREAN_FONT_CANDIDATES = [
+    Path("/System/Library/Fonts/AppleSDGothicNeo.ttc"),
+    Path("/System/Library/Fonts/Supplemental/AppleGothic.ttf"),
+    Path("/System/Library/Fonts/Supplemental/AppleMyungjo.ttf"),
+]
+
+
+def find_korean_font() -> Path | None:
+    """한글 글리프를 지원하는 시스템 트루타입 폰트를 찾는다.
+
+    다른 macOS 머신에는 이 폰트들이 없을 수도 있으므로, 예외를 던지지 않고
+    None을 반환해 호출자가 pytest.skip 등으로 우아하게 건너뛰게 한다.
+    """
+    for candidate in _KOREAN_FONT_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
 
 def _render_text_document(
-    lines: list[str] | None = None, width: int = 1000, height: int = 1300
+    lines: list[str] | None = None,
+    width: int = 1000,
+    height: int = 1300,
+    *,
+    font_path: Path | None = None,
 ) -> tuple[np.ndarray, str]:
-    """PIL로 흰 배경에 검은 텍스트를 그려 "문서 스캔본"처럼 보이는 이미지를 만든다."""
+    """PIL로 흰 배경에 검은 텍스트를 그려 "문서 스캔본"처럼 보이는 이미지를 만든다.
+
+    `font_path`가 주어지면 해당 트루타입 폰트로 렌더링한다 — `ImageFont.load_default()`는
+    한글 글리프가 없어 한글 fixture 렌더링에는 쓸 수 없기 때문이다.
+    """
     lines = lines if lines is not None else DEFAULT_TEXT_LINES
     image = Image.new("RGB", (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default(size=32)
+    font = (
+        ImageFont.truetype(str(font_path), size=32)
+        if font_path
+        else ImageFont.load_default(size=32)
+    )
     y = 60
     for line in lines:
         draw.text((60, y), line, fill=(0, 0, 0), font=font)
@@ -195,12 +242,31 @@ def _render_text_document(
 
 
 def make_text_photo(
-    *, seed: int = DEFAULT_SEED, lines: list[str] | None = None
+    *,
+    seed: int = DEFAULT_SEED,
+    lines: list[str] | None = None,
+    font_path: Path | None = None,
 ) -> SyntheticPhoto:
     """스마트폰으로 삐딱하게 찍은 저화질 텍스트 문서 사진 fixture를 생성한다."""
-    document, text = _render_text_document(lines)
+    document, text = _render_text_document(lines, font_path=font_path)
     photo, corners = _photograph(document, seed=seed)
     return SyntheticPhoto(photo=photo, ground_truth=document, corners=corners, text=text)
+
+
+def make_korean_text_photo(*, seed: int = DEFAULT_SEED) -> SyntheticPhoto:
+    """한글+영문이 섞인 텍스트 문서 사진 fixture를 생성한다 (kor+eng OCR 검증용).
+
+    시스템에 한글 지원 폰트가 없으면 `KoreanFontUnavailableError`를 던진다 —
+    호출자(테스트)는 이를 pytest.skip으로 처리해 다른 macOS 머신에서도 안전하게
+    돌아가게 해야 한다.
+    """
+    font_path = find_korean_font()
+    if font_path is None:
+        raise KoreanFontUnavailableError(
+            "한글 지원 시스템 폰트를 찾을 수 없습니다 "
+            f"(확인한 경로: {[str(p) for p in _KOREAN_FONT_CANDIDATES]})."
+        )
+    return make_text_photo(seed=seed, lines=DEFAULT_KOREAN_TEXT_LINES, font_path=font_path)
 
 
 # ---------------------------------------------------------------------------

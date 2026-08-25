@@ -13,7 +13,7 @@
 | 1 | 프로젝트 스캐폴딩 (git init, venv, 폴더구조, pytest) | — | 없음 | `954d8b88` | ✅ 완료 |
 | 1b | 합성 테스트 픽스처 생성 유틸리티 (텍스트/도형/악보 왜곡 이미지 코드로 생성) | — | #1 | `ef4c4c61` | ✅ 완료 |
 | 2 | 공통 전처리 파이프라인 (원근보정/deskew/조명보정/업스케일) | PRE-1~5 | #1, #1b | `00a177ec` | ✅ 완료 |
-| 3 | 텍스트 OCR 처리기 (OCR + OCRmyPDF) — ⚠️Ghostscript 설치 필요(착수 직전, Tesseract/qpdf는 설치완료) | TXT-1,2 | #2 | `3770f54b` | ⬜ 대기 |
+| 3 | 텍스트 OCR 처리기 (OCR + OCRmyPDF) | TXT-1,2 | #2 | `3770f54b` | ✅ 완료 |
 | 4 | PDF 조립 최소 구현 (단순 병합) | PDF-1 | #3 | `c48f1148` | ⬜ 대기 |
 | 5 | 최소 GUI (입력/미리보기/저장, 처리 파이프라인은 QThread로 실행해 UI 비블로킹 보장) | GUI-1,2,4 | #4 | `bce4fa7d` | ⬜ 대기 |
 | 6 | 텍스트 검수 UI | TXT-3 | #5 | `40e5540c` | ⬜ 대기 |
@@ -121,6 +121,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 악보 fixture는 MuseScore가 없으면(`find_musescore_executable()`이 `None` 반환) `ScoreRendererUnavailableError` → `pytest.skip`으로 우아하게 건너뛰도록 설계함. 이 머신에는 아직 MuseScore가 설치돼 있지 않아(Phase3 착수 전까지 의도적으로 보류) 현재 이 fixture는 skip 상태.
 - `code-reviewer`가 검토: HIGH/MEDIUM 이슈 없음. LOW 3건 중 "MuseScore 없이 skip되는 경로라 music21 MusicXML 생성 로직 자체가 pytest에서 exercise 안 됨" 1건을 반영해 `_build_synthetic_score()` 단독 스모크 테스트(`test_build_synthetic_score_produces_well_formed_musicxml`)를 추가함. 나머지 2건(왜곡 판정 테스트의 약한 assertion, macOS 마이그레이션 문서 변경과 커밋 분리 필요)은 blocking 아님으로 판단해 참고만 하고 넘어감.
 - 최종 검증: `./.venv/bin/python -m pytest -q` → 7 passed, 1 skipped(MuseScore 미설치, 의도된 결과). `./.venv/bin/python -m ruff check .` → 통과.
+
+### ✅ Phase1-3: 텍스트 OCR 처리기 — 완료
+
+- Homebrew `tesseract`/`ghostscript`/`qpdf` 설치 확인 완료. 한국어 인식(TXT-1)을 위해 `tessdata_fast` 저장소의 `kor.traineddata`(약 1.6MB)를 `/opt/homebrew/share/tessdata/`에 받아 추가함(전체 언어팩(`tesseract-lang`, 수백MB) 대신 필요한 언어만 최소로 설치 — 사용자 결정).
+- `python-dev-expert`가 `app/processors/text.py` 구현: `extract_text`(TXT-1, pytesseract), `build_searchable_pdf`(TXT-2, img2pdf+OCRmyPDF), `process_image`/`process_image_file`(진입점). `app.preprocess.run_pipeline`을 그대로 재사용.
+- `code-reviewer`가 검토해 HIGH 1건 발견: `extract_text()`와 `build_searchable_pdf()`가 Tesseract를 각각 별도로 실행해 검수용 텍스트와 실제 PDF 텍스트 레이어가 미묘하게 달라지는 문제(재현 확인됨) — `ocrmypdf.ocr(..., sidecar=...)`로 한 번의 실행으로 통합해 해결. MEDIUM 1건: 한글 인식이 테스트에서 전혀 검증되지 않던 문제 — 사용자 확인 후 macOS 시스템 한글 폰트로 렌더링하는 fixture(`make_korean_text_photo`)를 추가해 실측 유사도 0.98 확인. LOW(유사도 임계값 완화, logger 미사용)도 함께 수정. 나머지 사소한 지적(Ghostscript degrade 시 문서 정합성)은 `docs/issue.md`에 기록.
+- 최종 검증: `pytest -q` → 48 passed, 2 skipped(MuseScore 미설치, 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
