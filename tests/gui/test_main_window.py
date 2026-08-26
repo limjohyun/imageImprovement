@@ -12,12 +12,15 @@ from __future__ import annotations
 import shutil
 
 import cv2
+import numpy as np
 import pymupdf
 import pytest
 from PySide6.QtCore import Qt, QThread, Signal
 
 from app.gui.main_window import MainWindow, render_pdf_first_page_to_pixmap
 from app.gui.worker import PageResult
+from app.processors.diagram import VECTORIZATION_DISCLAIMER
+from app.router.classifier import DocumentType
 
 _TESSERACT_AVAILABLE = shutil.which("tesseract") is not None
 _GHOSTSCRIPT_AVAILABLE = shutil.which("gs") is not None
@@ -259,6 +262,109 @@ def test_save_result_writes_pdf_to_chosen_path(qtbot, tmp_path, monkeypatch, syn
     assert destination.exists()
     with pymupdf.open(destination) as doc:
         assert doc.page_count == 1
+
+
+def test_vectorize_finished_ignores_stale_page_if_selection_changed(qtbot, tmp_path):
+    """DIA-3: 벡터화 완료 콜백은 "클릭 당시 페이지"가 아니라 "지금 화면에 보이는
+    페이지" 기준으로 화면을 갱신해야 한다.
+
+    페이지 A에서 벡터화를 요청한 뒤 완료 전에 사용자가 페이지 B(텍스트 페이지)로
+    선택을 옮기면, 완료 콜백이 돌아와도 B 화면(꺼진 버튼/빈 라벨)을 건드리지 않고
+    데이터(PageResult)만 조용히 A에 반영해야 한다.
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    page_a = tmp_path / "page_a.png"
+    page_b = tmp_path / "page_b.png"
+    page_a.write_bytes(b"fake-image-bytes")
+    page_b.write_bytes(b"fake-image-bytes")
+    window._add_image_paths([page_a, page_b])
+
+    result_a = PageResult(
+        input_path=page_a,
+        page_pdf_path=tmp_path / "page_a.pdf",
+        document_type=DocumentType.DIAGRAM,
+        sharpened_image=np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    result_b = PageResult(
+        input_path=page_b,
+        page_pdf_path=tmp_path / "page_b.pdf",
+        document_type=DocumentType.TEXT,
+        text="",
+    )
+    window._results_by_input[str(page_a.resolve())] = result_a
+    window._results_by_input[str(page_b.resolve())] = result_b
+
+    item_a = window.file_list_widget.item(0)
+    item_b = window.file_list_widget.item(1)
+
+    window.file_list_widget.setCurrentItem(item_a)
+    assert window.vectorize_button.isEnabled() is True
+
+    # 실제 클릭 핸들러가 하는 것처럼 벡터화 시작 시 버튼을 끈다.
+    window.vectorize_button.setEnabled(False)
+
+    # 완료되기 전에 사용자가 B(텍스트 페이지, 벡터화 버튼이 꺼져 있어야 함)로 옮긴다.
+    window.file_list_widget.setCurrentItem(item_b)
+    assert window.vectorize_button.isEnabled() is False
+
+    svg_path = tmp_path / "page_a.svg"
+    svg_path.write_text("<svg></svg>")
+
+    class _FakeVectorizeWorker:
+        def __init__(self) -> None:
+            self.svg_path = svg_path
+
+    window._vectorize_worker = _FakeVectorizeWorker()
+    window._on_vectorize_finished(result_a, page_a)
+
+    # 화면은 여전히 B 기준을 유지해야 한다 — A 완료 때문에 버튼이 켜지거나
+    # A의 고지 문구가 라벨에 노출되면 안 된다.
+    assert window.vectorize_button.isEnabled() is False
+    assert window.vectorization_disclaimer_label.text() == ""
+
+    # 데이터는 조용히 A에 반영돼 있어야 한다.
+    assert result_a.svg_path == svg_path
+    assert result_a.vectorization_disclaimer == VECTORIZATION_DISCLAIMER
+
+    # 나중에 A로 돌아오면 최신 상태(벡터화 완료 고지)가 정확히 보인다.
+    window.file_list_widget.setCurrentItem(item_a)
+    assert window.vectorization_disclaimer_label.text() == VECTORIZATION_DISCLAIMER
+
+
+def test_vectorize_error_does_not_reenable_button_for_different_page(
+    qtbot, tmp_path, monkeypatch
+):
+    """벡터화 실패 콜백도 완료 콜백과 마찬가지로 화면 갱신 전에 선택 일치 여부를 확인해야 한다."""
+    monkeypatch.setattr("app.gui.main_window.QMessageBox.critical", lambda *a, **k: None)
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    page_a = tmp_path / "page_a.png"
+    page_b = tmp_path / "page_b.png"
+    page_a.write_bytes(b"fake-image-bytes")
+    page_b.write_bytes(b"fake-image-bytes")
+    window._add_image_paths([page_a, page_b])
+
+    result_b = PageResult(
+        input_path=page_b,
+        page_pdf_path=tmp_path / "page_b.pdf",
+        document_type=DocumentType.TEXT,
+        text="",
+    )
+    window._results_by_input[str(page_b.resolve())] = result_b
+
+    item_b = window.file_list_widget.item(1)
+    window.file_list_widget.setCurrentItem(item_b)
+    assert window.vectorize_button.isEnabled() is False
+
+    window._vectorize_worker = object()
+    window._on_vectorize_error("vtracer 실행 실패", page_a)
+
+    assert window.vectorize_button.isEnabled() is False
+    assert window._vectorize_worker is None
 
 
 def test_render_pdf_first_page_to_pixmap_returns_non_null_pixmap(qtbot, tmp_path):

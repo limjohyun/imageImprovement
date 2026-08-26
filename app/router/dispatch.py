@@ -1,10 +1,9 @@
 """RT-2: 분류 결과(`DocumentType`)에 따라 해당 `app.processors.*` 모듈로 위임한다.
 
-현재는 텍스트 처리기(`app.processors.text.process_image`)만 실제로 등록되어
-있다. 도형/악보 처리기는 각각 Phase2-2(`app/processors/diagram.py`),
-Phase3-1(`app/processors/score.py`)에서 구현된 뒤 `_PROCESSOR_REGISTRY`에
-채워 넣으면 된다 — 지금은 그 확장 지점만 명확히 마련해둔다. 아직 구현되지 않은
-유형으로 분류된 경우, 조용히 무시하거나 텍스트 처리기로 폴백하지 않고
+텍스트(`app.processors.text.process_image`)와 도형(`app.processors.diagram.process_image`)
+처리기가 등록되어 있다. 악보 처리기는 Phase3-1(`app/processors/score.py`)에서 구현된
+뒤 `_PROCESSOR_REGISTRY`에 채워 넣으면 된다 — 지금은 그 확장 지점만 명확히 마련해둔다.
+아직 구현되지 않은 유형으로 분류된 경우, 조용히 무시하거나 텍스트 처리기로 폴백하지 않고
 `UnsupportedDocumentTypeError`를 명시적으로 던진다.
 """
 
@@ -16,6 +15,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from app.processors import diagram as diagram_processor
 from app.processors import text as text_processor
 from app.router.classifier import DocumentType, classify_document_type
 
@@ -28,11 +28,11 @@ class UnsupportedDocumentTypeError(NotImplementedError):
 
 ProcessorFn = Callable[..., Any]
 
-# RT-2 확장 지점: Phase2-2가 `DocumentType.DIAGRAM`을, Phase3-1이
-# `DocumentType.SCORE`를 각각 app.processors.diagram / app.processors.score의
+# RT-2 확장 지점: Phase3-1이 `DocumentType.SCORE`를 app.processors.score의
 # 진입점 함수로 채우면 된다.
 _PROCESSOR_REGISTRY: dict[DocumentType, ProcessorFn] = {
     DocumentType.TEXT: text_processor.process_image,
+    DocumentType.DIAGRAM: diagram_processor.process_image,
 }
 
 

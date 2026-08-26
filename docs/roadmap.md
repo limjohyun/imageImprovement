@@ -28,7 +28,7 @@
 | 1 | 문서 유형 라우팅(router) 구현 | RT-1,2 | Phase1#7 | `7ef7d4ad` | ✅ 완료 |
 | 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ✅ 완료 |
 | 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ✅ 완료 |
-| 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ⬜ 대기 |
+| 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ✅ 완료 |
 | 5 | Phase2 End-to-End 검증 | §9 Phase2/3 | #4 | `d2d67738` | ⬜ 대기 |
 
 ## Phase 3 — 악보 처리 (OMR)
@@ -167,6 +167,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 구현: `app/processors/diagram.py`에 `vectorize_diagram(image, output_svg, **vtracer_params)`(vtracer의 `convert_raw_image_to_svg`로 PNG 바이트를 직접 넘겨 임시 파일 없이 SVG 생성) 추가, `DiagramResult`에 `svg_path`/`vectorization_disclaimer` 필드 추가, `process_image`에 `vectorize: bool = False` 옵션 추가(기본값은 벡터화 미실행, DIA-2 "사용자가 요청 시" 충족). `VECTORIZATION_DISCLAIMER` 상수(DIA-3 한계 고지 문구, "PPTX 수준의 완전 재편집이 아니다")를 처리기 계층에 준비해 Phase2-4에서 GUI가 그대로 가져다 쓸 수 있게 함 — 이번 태스크는 GUI 위젯 자체를 만들지 않음(로드맵이 DIA-3(UI)을 Phase2-4로 이미 분리해둠).
 - `code-reviewer`가 검토: 차단급 문제 없음. vtracer 실제 API 시그니처와 호출 키워드 인자가 정확히 일치함을 `inspect.signature`로 직접 재확인, DIA-2(기본값 미실행)/DIA-3(GUI 분리 경계) 요구사항 부합 확인, `_PROCESSOR_REGISTRY` 하위 호환성 문제 없음 확인. 경미한 지적 4건은 모두 차단 사유가 아니라고 판단해 이번엔 반영하지 않음: (1) vtracer 파라미터 12개를 전부 시그니처에 노출한 것은 다소 앞서간 확장이나 얕은 파라미터 통과라 실질 비용 낮음, (2) PNG 인코딩 3줄 블록이 같은 파일 내에서 두 번째로 중복되나 6줄 미만이라 보류, (3) `output_svg` 기본 경로(`Path(output_pdf).with_suffix(".svg")`)가 `output_pdf`에 이미 `.svg` 확장자가 들어오면 방금 쓴 PDF를 조용히 덮어쓸 수 있음 — **Phase2-4에서 GUI가 파일명을 생성할 때 `.pdf` 확장자가 항상 보장되는지 반드시 확인할 것**, (4) roadmap 서술 섹션 누락(이 커밋으로 보완).
 - 최종 검증: `pytest -q` → 87 passed, 2 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase2-4: GUI에 도형 처리 경로 연결 — 완료 (Phase2 도형 파이프라인 전체 완료)
+
+- `python-dev-expert`가 구현: `app/router/dispatch.py`의 `_PROCESSOR_REGISTRY`에 `DocumentType.DIAGRAM`을 등록. `app/gui/worker.py`의 `ProcessingWorker`를 텍스트 하드코딩에서 라우팅 인식형으로 전면 재작성(이미지별로 전처리→`classify_document_type`→`route_and_process`), `PageResult`에 `document_type`/`sharpened_image`/`svg_path`/`vectorization_disclaimer` 필드를 기존 필드 호환을 유지한 채 추가. 신설 `VectorizeWorker(QThread)`로 DIA-2 벡터화를 별도 백그라운드 스레드로 분리(이미 선명화된 이미지 재사용). `app/gui/main_window.py`에 도형 페이지 전용 검수 안내 문구, "도형 벡터화" 버튼 + 상시 라벨(DIA-3 한계 고지를 팝업+라벨 두 채널로 노출) 추가.
+- `code-reviewer`가 검토해 MEDIUM 2건 발견: (1) 배치 중 한 페이지만 미구현 유형(SCORE)으로 분류돼도 배치 전체가 완전 실패하고 부분 저장도 불가능하던 문제(줄무늬 배경의 SCORE 오탐 시 실제 발생 가능) — 페이지 단위 실패를 격리해 성공한 페이지만으로도 병합·저장 가능하게 수정, `failed_pages`로 실패 요약을 사용자에게 안내. (2) 벡터화 완료/실패 콜백이 클릭 당시 페이지 기준으로 화면을 갱신해 선택이 바뀐 사이 다른 페이지에 잘못된 상태가 노출되던 문제 — `_is_currently_selected` 가드로 데이터는 항상 갱신하되 화면 갱신만 조건부로 수정. 재검토에서 에러 팝업만 이 가드가 빠진 비대칭을 추가로 발견해(성공 팝업은 가드됨) 반영: 선택된 페이지가 아니면 팝업 대신 상태표시줄에 조용히 안내.
+- 최종 검증: `pytest -q` → 96 passed, 3 skipped(MuseScore·Real-ESRGAN 가중치·oemer 체크포인트 미설치, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+- **Phase2(도형/그래프 처리 + 유형 라우팅 도입) 핵심 파이프라인 전체 완료.** 남은 건 Phase2-5(End-to-End 검증).
 
 ## 다음 진행 방식
 

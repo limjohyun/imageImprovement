@@ -1,18 +1,29 @@
-"""Phase1-5(GUI-1,2,4): 텍스트 처리 파이프라인 전체를 백그라운드 스레드에서 실행하는 워커.
+"""Phase1-5(GUI-1,2,4)+Phase2-4(DIA-3 UI): 파이프라인 전체를 백그라운드 스레드에서 실행하는 워커.
 
-전처리(`app.preprocess`) + OCR(`app.processors.text`) + PDF 병합(`app.pdf_assembly`)은
-모두 무거운 연산(업스케일, Tesseract, OCRmyPDF/Ghostscript 서브프로세스 호출 등)이므로
-GUI 메인 스레드에서 그대로 호출하면 UI가 블로킹된다. `QThread`를 상속해 이 전체 과정을
-별도 스레드에서 실행한다.
+전처리(`app.preprocess`) + 라우팅(`app.router`) + 처리기(`app.processors.*`) +
+PDF 병합(`app.pdf_assembly`)은 모두 무거운 연산(업스케일, Tesseract, OCRmyPDF/
+Ghostscript 서브프로세스 호출, vtracer 등)이므로 GUI 메인 스레드에서 그대로
+호출하면 UI가 블로킹된다. `QThread`를 상속해 이 전체 과정을 별도 스레드에서
+실행한다.
+
+`ProcessingWorker`는 이미지 목록을 순회하며 각 페이지를 자동 분류(`DocumentType`)한
+뒤 알맞은 처리기(텍스트/도형)로 위임한다 — 수동 오버라이드 UI는 Phase4-4로 미룬
+범위 밖이므로 항상 자동 분류(`override=None`)만 사용한다. `VectorizeWorker`는
+이미 도형으로 처리된 페이지 한 장에 대해 사용자가 명시적으로 "SVG로 벡터화"를
+요청했을 때만 별도로 실행되는 훨씬 가벼운 워커다(DIA-2).
 
 QThread가 기본 제공하는 `finished` 시그널(인자 없음)을 그대로 사용한다 — 이 시그널을
 커스텀 시그널로 덮어쓰면 pytest-qt 공식 예제(`qtbot.waitSignal(worker.finished, ...)`,
 https://pytest-qt.readthedocs.io/en/latest/signals.html)가 기대하는 스레드 종료 알림
 메커니즘과 이름이 충돌한다. 처리 실패는 별도 시그널(`error_occurred`)로 전달하고,
 결과 값(성공 시 병합 PDF 경로 포함)은 스레드 종료 후에도 읽을 수 있도록 인스턴스
-속성(`merged_pdf_path`, `page_results`)에 남겨둔다. `finished` 시그널을 받은 뒤
-호출부가 `merged_pdf_path` 속성을 직접 읽으면 되므로 별도의 결과 전달용 시그널은
-두지 않는다.
+속성(`merged_pdf_path`, `page_results`, `svg_path`)에 남겨둔다. `finished` 시그널을
+받은 뒤 호출부가 해당 속성을 직접 읽으면 되므로 별도의 결과 전달용 시그널은 두지 않는다.
+
+배치 중 한 페이지가 (예: 줄무늬 배경이 오선으로 오검출되어 `SCORE`로 잘못 분류되는
+등) 아직 구현되지 않은 유형으로 라우팅되어 실패하더라도, 그 한 장 때문에 이미 성공한
+나머지 페이지 결과까지 버리지 않는다 — 페이지 단위 실패는 `failed_pages`에 모으고
+계속 진행하며, 성공한 페이지가 하나라도 있으면 그것만으로 병합 PDF를 만든다.
 """
 
 from __future__ import annotations
@@ -21,25 +32,52 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import cv2
+import numpy as np
 from PySide6.QtCore import QThread, Signal
 
 from app.pdf_assembly.assemble import assemble_pdf
-from app.processors.text import process_image_file
+from app.preprocess.pipeline import PreprocessConfig, run_pipeline
+from app.processors.diagram import DiagramResult
+from app.processors.diagram import vectorize_diagram as _vectorize_diagram
+from app.processors.text import TextOcrResult
+from app.router.classifier import DocumentType, classify_document_type
+from app.router.dispatch import UnsupportedDocumentTypeError, route_and_process
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class PageResult:
-    """입력 이미지 한 장을 처리한 결과. Phase1-6(텍스트 검수 UI)이 `text`를 그대로 재사용한다."""
+    """입력 이미지 한 장을 처리한 결과.
+
+    `input_path`/`page_pdf_path`/`text` 세 필드는 Phase1부터 있던 필드로, 기존
+    호출부(테스트 포함)가 키워드 인자로 직접 `PageResult(...)`를 생성하고 있어
+    이름과 호출 방식을 바꾸지 않는다. Phase2-4에서 추가된 필드는 모두 기본값이
+    있는 키워드 전용 확장이다.
+    """
 
     input_path: Path
     page_pdf_path: Path
-    text: str
+    text: str | None = None
+    """OCR 인식 텍스트 (TXT-1/TXT-3). 도형 페이지는 텍스트 레이어가 없으므로 None."""
+
+    document_type: DocumentType = DocumentType.TEXT
+    """RT-1 자동 분류 결과. GUI가 이 값으로 검수 패널/벡터화 버튼 활성 여부를 정한다."""
+
+    sharpened_image: np.ndarray | None = None
+    """도형 페이지의 선명화된 이미지 (BGR, uint8). DIA-2 벡터화를 재전처리 없이
+    재사용할 수 있도록 보관한다. 텍스트 페이지는 None."""
+
+    svg_path: Path | None = None
+    """DIA-2: 사용자가 명시적으로 벡터화를 요청했을 때만 채워지는 SVG 결과 경로."""
+
+    vectorization_disclaimer: str | None = None
+    """DIA-3: `svg_path`가 채워졌을 때만 함께 채워지는 한계 고지 문구."""
 
 
 class ProcessingWorker(QThread):
-    """선택된 이미지 파일들을 순회하며 텍스트 파이프라인을 실행하고 최종 PDF로 병합한다."""
+    """선택된 이미지 파일들을 순회하며 자동 분류 후 알맞은 처리기로 위임하고 최종 PDF로 병합한다."""
 
     progress_changed = Signal(int, int)
     """(완료한 페이지 수, 전체 페이지 수)."""
@@ -48,7 +86,9 @@ class ProcessingWorker(QThread):
     """페이지 한 장 처리가 끝날 때마다 `PageResult`를 실어 보낸다(미리보기 갱신용)."""
 
     error_occurred = Signal(str)
-    """파이프라인 도중 예외가 발생했을 때 사용자에게 보여줄 메시지."""
+    """파이프라인 도중 예외가 발생했을 때(또는 일부 페이지가 실패했을 때) 사용자에게
+    보여줄 메시지. 전체 실패든 일부 페이지 실패든 이 시그널 하나로 알린다 — 구분은
+    호출부가 `merged_pdf_path`가 채워졌는지로 판단한다."""
 
     def __init__(
         self,
@@ -56,35 +96,138 @@ class ProcessingWorker(QThread):
         work_dir: Path,
         *,
         lang: str | None = None,
+        preprocess_config: PreprocessConfig | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
         self.image_paths = [Path(p) for p in image_paths]
         self.work_dir = Path(work_dir)
         self._lang_kwargs = {"lang": lang} if lang else {}
+        self._preprocess_config = preprocess_config
         self.page_results: list[PageResult] = []
+        self.failed_pages: list[tuple[Path, str]] = []
+        """페이지 단위로 실패한 (입력 경로, 오류 메시지) 목록. 배치 중 일부 페이지만
+        (예: 분류 오탐으로 미구현 유형에 배정) 실패해도 나머지 페이지는 계속
+        처리하고 병합할 수 있도록, 예외를 즉시 던지는 대신 여기 모아둔다."""
         self.merged_pdf_path: Path | None = None
 
     def run(self) -> None:
-        """QThread 진입점. 예외는 밖으로 던지지 않고 `error_occurred`로 알린다."""
+        """QThread 진입점.
+
+        페이지 하나 처리 실패는 배치 전체를 중단시키지 않는다 — 실패한 페이지는
+        `failed_pages`에 기록하고 다음 페이지로 넘어간다. 성공한 페이지가 하나라도
+        있으면 그 페이지들만으로 병합 PDF를 만들어 `merged_pdf_path`를 채우고,
+        실패가 있었다면 `error_occurred`로 요약을 함께 알린다. 성공한 페이지가
+        하나도 없으면 완전 실패로 처리한다(`merged_pdf_path`는 `None`).
+        """
         total = len(self.image_paths)
         try:
             self.work_dir.mkdir(parents=True, exist_ok=True)
-            for index, image_path in enumerate(self.image_paths, start=1):
-                page_pdf_path = self.work_dir / f"page_{index:03d}.pdf"
-                result = process_image_file(image_path, page_pdf_path, **self._lang_kwargs)
-                page_result = PageResult(
-                    input_path=image_path, page_pdf_path=result.pdf_path, text=result.text
-                )
+        except OSError as exc:
+            logger.exception("작업 디렉터리를 만들 수 없습니다: %s", self.work_dir)
+            self.error_occurred.emit(str(exc))
+            return
+
+        for index, image_path in enumerate(self.image_paths, start=1):
+            page_pdf_path = self.work_dir / f"page_{index:03d}.pdf"
+            try:
+                page_result = self._process_one(image_path, page_pdf_path)
+            except Exception as exc:  # noqa: BLE001 - 페이지 단위 실패를 배치 전체 실패와 분리하려고 넓게 잡음
+                logger.exception("페이지 처리 중 오류가 발생했습니다: %s", image_path)
+                self.failed_pages.append((image_path, str(exc)))
+            else:
                 self.page_results.append(page_result)
                 self.page_processed.emit(page_result)
-                self.progress_changed.emit(index, total)
+            self.progress_changed.emit(index, total)
 
+        if not self.page_results:
+            self.error_occurred.emit(self._build_failure_summary(total))
+            return
+
+        try:
             merged_pdf_path = self.work_dir / "merged.pdf"
             assemble_pdf([r.page_pdf_path for r in self.page_results], merged_pdf_path)
         except Exception as exc:  # noqa: BLE001 - 외부 프로세스/파일 IO 경계라 광범위하게 잡아 신호로 전달
-            logger.exception("텍스트 처리 파이프라인 실행 중 오류가 발생했습니다.")
+            logger.exception("PDF 병합 중 오류가 발생했습니다.")
             self.error_occurred.emit(str(exc))
             return
 
         self.merged_pdf_path = merged_pdf_path
+        if self.failed_pages:
+            # 일부 페이지는 실패했지만 나머지는 저장 가능하다는 것을 알린다
+            # (merged_pdf_path가 이미 채워진 뒤에 emit해야 호출부가 "부분 성공"으로
+            # 구분할 수 있다).
+            self.error_occurred.emit(self._build_failure_summary(total))
+
+    def _build_failure_summary(self, total: int) -> str:
+        """실패한 페이지 목록을 사용자에게 보여줄 한 줄 요약 메시지로 만든다."""
+        detail = "; ".join(f"{path.name}: {message}" for path, message in self.failed_pages)
+        return f"{total}장 중 {len(self.failed_pages)}장 처리 실패: {detail}"
+
+    def _process_one(self, image_path: Path, page_pdf_path: Path) -> PageResult:
+        """이미지 한 장을 (읽기 → 공통 전처리 → 자동 분류 + 위임)까지 처리한다.
+
+        `route_and_process`는 이미 전처리된 이미지를 받는 API이므로, 여기서 전처리를
+        먼저 한 번만 수행하고 그 결과를 넘긴다(이중 전처리 방지). 분류는 여기서
+        먼저 한 번 수행해(`classify_document_type`) 그 결과에 따라 텍스트 처리기
+        전용 옵션(`lang`)이 도형 처리기에 잘못 전달되지 않게 한다.
+        """
+        image = cv2.imread(str(image_path))
+        if image is None:
+            raise FileNotFoundError(f"이미지를 읽을 수 없습니다: {image_path}")
+        preprocessed = run_pipeline(image, self._preprocess_config)
+
+        document_type = classify_document_type(preprocessed)
+        extra_kwargs = self._lang_kwargs if document_type == DocumentType.TEXT else {}
+        result = route_and_process(
+            preprocessed, page_pdf_path, override=document_type, **extra_kwargs
+        )
+
+        if isinstance(result, TextOcrResult):
+            return PageResult(
+                input_path=image_path,
+                page_pdf_path=result.pdf_path,
+                text=result.text,
+                document_type=document_type,
+            )
+        if isinstance(result, DiagramResult):
+            return PageResult(
+                input_path=image_path,
+                page_pdf_path=result.pdf_path,
+                text=None,
+                document_type=document_type,
+                sharpened_image=result.sharpened_image,
+                svg_path=result.svg_path,
+                vectorization_disclaimer=result.vectorization_disclaimer,
+            )
+        # route_and_process가 미구현 유형(예: SCORE)에 대해서는 이미
+        # UnsupportedDocumentTypeError를 던지므로 정상 흐름에서는 도달하지 않는다.
+        # 향후 새 처리기가 등록됐는데 여기 변환 로직을 깜빡 잊는 실수를 조용히
+        # 넘기지 않기 위한 안전망이다.
+        raise UnsupportedDocumentTypeError(
+            f"'{document_type.value}' 처리 결과를 PageResult로 변환할 방법이 없습니다."
+        )
+
+
+class VectorizeWorker(QThread):
+    """DIA-2: 이미 도형으로 처리된 페이지 한 장을 사용자가 명시적으로 요청했을 때 SVG로 변환한다.
+
+    `PageResult.sharpened_image`(이미 선명화까지 끝난 결과)를 그대로 입력받으므로
+    전처리/선명화를 다시 수행하지 않는다.
+    """
+
+    error_occurred = Signal(str)
+    """vtracer 실행 중 예외가 발생했을 때 사용자에게 보여줄 메시지."""
+
+    def __init__(self, sharpened_image: np.ndarray, output_svg: str | Path, parent=None) -> None:
+        super().__init__(parent)
+        self.sharpened_image = sharpened_image
+        self.output_svg = Path(output_svg)
+        self.svg_path: Path | None = None
+
+    def run(self) -> None:
+        try:
+            self.svg_path = _vectorize_diagram(self.sharpened_image, self.output_svg)
+        except Exception as exc:  # noqa: BLE001 - 외부 라이브러리(vtracer) 호출 경계
+            logger.exception("도형 벡터화 중 오류가 발생했습니다.")
+            self.error_occurred.emit(str(exc))
