@@ -1,21 +1,25 @@
-"""SCR-1: 악보 OMR(광학 악보 인식) 처리기.
+"""SCR-1/SCR-2: 악보 OMR(광학 악보 인식) 및 재조판 PDF 생성 처리기.
 
 전처리(`app.preprocess`)를 거친 악보 이미지 한 장을 받아 oemer(사전학습 OMR
-모델)로 오선/음표/기호를 인식한 뒤 MusicXML 파일을 생성한다. `oemer.ete.extract`가
-파일 경로 기반 CLI 지향 API라서, 이미지를 임시 PNG 파일로 써서 넘긴 뒤 결과
-MusicXML을 호출자가 지정한 경로로 복사하는 방식을 쓴다(`text.py`가 img2pdf 호출을
-위해 임시 파일 대신 인코딩 바이트를 쓰는 것과 달리, oemer는 경로 자체가 필수
-인자라 우회할 수 없다).
+모델)로 오선/음표/기호를 인식해 MusicXML 파일을 생성하고(SCR-1),
+그 MusicXML을 MuseScore CLI로 재조판해 깔끔한 형태의 PDF로 렌더링한다(SCR-2).
+`oemer.ete.extract`가 파일 경로 기반 CLI 지향 API라서, 이미지를 임시 PNG
+파일로 써서 넘긴 뒤 결과 MusicXML을 호출자가 지정한 경로로 복사하는 방식을
+쓴다(`text.py`가 img2pdf 호출을 위해 임시 파일 대신 인코딩 바이트를 쓰는
+것과 달리, oemer는 경로 자체가 필수 인자라 우회할 수 없다).
 
-재조판 PDF 생성(SCR-2, MuseScore 연동)은 이 모듈의 범위 밖이다 — 여기서는
-MusicXML 산출까지만 담당한다.
+오류 검수(SCR-3, GUI/외부 편집기 연동)는 이 모듈의 범위 밖이다.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
+import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
@@ -120,3 +124,188 @@ def recognize_score_file(
         raise FileNotFoundError(f"이미지를 읽을 수 없습니다: {input_path}")
     preprocessed = run_pipeline(image, preprocess_config)
     return recognize_score(preprocessed, output_musicxml, use_tf=use_tf, deskew=deskew)
+
+
+# ---------------------------------------------------------------------------
+# SCR-2: 재조판 PDF 생성 (MuseScore 연동)
+# ---------------------------------------------------------------------------
+
+
+class ScoreRendererUnavailableError(RuntimeError):
+    """MuseScore 실행 파일을 찾지 못했을 때 발생시킨다.
+
+    `tests/fixtures/synthetic.py`의 동명 예외와 역할은 같지만, 프로덕션 코드가
+    테스트 코드를 import할 수 없다는 계층 규칙 때문에 이 모듈에 독립적으로 둔다.
+    """
+
+
+class ScoreRenderingError(RuntimeError):
+    """MuseScore가 실행은 됐지만 유효한 출력 PDF를 만들지 못했을 때 발생시킨다."""
+
+
+def find_musescore_executable() -> Path | None:
+    """MuseScore 4(또는 3) 실행 파일을 찾는다. 못 찾으면 예외 없이 None을 반환한다."""
+    candidates = [
+        shutil.which("mscore"),
+        shutil.which("mscore4portable"),
+        shutil.which("MuseScore4"),
+        "/Applications/MuseScore 4.app/Contents/MacOS/mscore",
+        "/Applications/MuseScore 3.app/Contents/MacOS/mscore",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return Path(candidate)
+    return None
+
+
+def _musescore_subprocess_env() -> dict[str, str]:
+    """MuseScore CLI 호출용 환경변수를 만든다.
+
+    이 프로젝트의 GUI/pytest-qt 테스트는 headless 실행을 위해
+    `QT_QPA_PLATFORM=offscreen`을 쓰는데, MuseScore 4가 번들한 Qt는 "offscreen"
+    플랫폼 플러그인을 포함하지 않고 "cocoa"만 제공한다. 이 환경변수가 그대로
+    상속되면 `mscore` 자식 프로세스가 Qt 플랫폼 플러그인을 찾지 못해 즉시
+    크래시한다(`tests/fixtures/synthetic.py`에서 실제 재현 확인, GUI 프로세스와
+    MuseScore 자식 프로세스의 Qt 요구사항이 서로 충돌하므로 자식 프로세스
+    환경에서만 제거한다).
+    """
+    env = os.environ.copy()
+    env.pop("QT_QPA_PLATFORM", None)
+    return env
+
+
+def retypeset_score(
+    musicxml_path: str | Path,
+    output_pdf: str | Path,
+    *,
+    mscore_path: str | Path | None = None,
+    timeout: float = 120.0,
+) -> Path:
+    """SCR-2: MusicXML을 MuseScore CLI로 재조판해 깔끔한 형태의 PDF로 렌더링한다.
+
+    이 macOS 환경에서 MuseScore 4는 출력 PDF를 정상적으로 다 쓴 *뒤에* 자체
+    크래시 리포터(Crashpad) 종료 경로에서 SIGABRT(exit code 134)로 죽는 경우가
+    실제로 재현된다 — 렌더링 자체의 실패가 아니다. 그래서 `check=True`로 종료
+    코드만 보고 성공 여부를 판단하지 않고, 실제로 유효한 PDF가 생성됐는지로
+    판단한다(`tests/fixtures/synthetic.py`의 `_render_score_to_image`와 동일한
+    패턴).
+    """
+    musicxml_path = Path(musicxml_path)
+    if not musicxml_path.is_file():
+        raise FileNotFoundError(f"MusicXML 파일을 찾을 수 없습니다: {musicxml_path}")
+
+    resolved_mscore = Path(mscore_path) if mscore_path is not None else find_musescore_executable()
+    if resolved_mscore is None:
+        raise ScoreRendererUnavailableError(
+            "MuseScore 실행 파일을 찾을 수 없습니다. `brew install --cask musescore`로 "
+            "설치한 뒤 다시 시도하세요."
+        )
+
+    output_pdf = Path(output_pdf)
+    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+    # 이번 호출이 output_pdf를 실제로 새로 썼는지를 파일 존재 여부만으로 판단할
+    # 수 있도록, mscore 실행 전에 과거 호출이 남긴 파일을 미리 지운다. 이걸
+    # 하지 않으면 이번 호출이 완전히 실패(즉시 exit, 파일에 손도 안 댐)해도
+    # 이전 호출의 유효한 PDF가 그대로 남아 "성공"으로 오인될 수 있다.
+    output_pdf.unlink(missing_ok=True)
+
+    logger.info("MuseScore로 재조판 PDF를 생성합니다: %s -> %s", musicxml_path, output_pdf)
+    try:
+        result = subprocess.run(
+            [str(resolved_mscore), "-o", str(output_pdf), str(musicxml_path)],
+            shell=False,
+            check=False,
+            capture_output=True,
+            timeout=timeout,
+            env=_musescore_subprocess_env(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ScoreRenderingError(
+            f"MuseScore 렌더링이 {timeout:.0f}초 내에 끝나지 않았습니다: {musicxml_path} "
+            "(입력 MusicXML이 손상되었을 가능성이 있습니다)"
+        ) from exc
+
+    if not output_pdf.is_file() or output_pdf.stat().st_size == 0:
+        stdout = result.stdout.decode("utf-8", errors="replace").strip()[:2000]
+        stderr = result.stderr.decode("utf-8", errors="replace").strip()[:2000]
+        logger.warning(
+            "MuseScore가 유효한 PDF를 생성하지 못했습니다 (exit=%s)\nstdout: %s\nstderr: %s",
+            result.returncode,
+            stdout,
+            stderr,
+        )
+        raise ScoreRenderingError(
+            f"MuseScore가 유효한 재조판 PDF를 생성하지 못했습니다: {output_pdf}"
+        )
+
+    return output_pdf
+
+
+@dataclass
+class ScoreResult:
+    """SCR-1 + SCR-2를 잇는 진입점(`process_image`/`process_image_file`)의 결과."""
+
+    musicxml_path: Path
+    """SCR-1: OMR로 인식한 MusicXML 경로."""
+
+    pdf_path: Path
+    """SCR-2: MuseScore로 재조판한 PDF 경로."""
+
+
+def process_image(
+    image: np.ndarray,
+    output_pdf: str | Path,
+    *,
+    output_musicxml: str | Path | None = None,
+    use_tf: bool = False,
+    deskew: bool = True,
+    mscore_path: str | Path | None = None,
+) -> ScoreResult:
+    """진입점: 전처리 완료된 악보 이미지 한 장 → (MusicXML, 재조판 PDF).
+
+    `app.processors.text.process_image`/`diagram.process_image`와 동일한 호출
+    규약(이미지, 출력 PDF 경로를 위치 인자로, 나머지는 키워드 인자로)을
+    따른다. `output_musicxml`을 지정하지 않으면 `diagram.py`의 `output_svg`
+    기본값 규칙과 동일하게 `output_pdf`와 같은 stem에 `.musicxml` 확장자를
+    붙인 경로를 쓴다.
+
+    아직 `app.router.dispatch`의 `_PROCESSOR_REGISTRY`에는 등록하지 않는다
+    (Phase3-4 GUI 연결 이후 판단할 사항).
+    """
+    output_pdf = Path(output_pdf)
+    musicxml_target = (
+        Path(output_musicxml)
+        if output_musicxml is not None
+        else output_pdf.with_suffix(".musicxml")
+    )
+
+    musicxml_path = recognize_score(image, musicxml_target, use_tf=use_tf, deskew=deskew)
+    pdf_path = retypeset_score(musicxml_path, output_pdf, mscore_path=mscore_path)
+
+    return ScoreResult(musicxml_path=musicxml_path, pdf_path=pdf_path)
+
+
+def process_image_file(
+    input_path: str | Path,
+    output_pdf: str | Path,
+    *,
+    output_musicxml: str | Path | None = None,
+    use_tf: bool = False,
+    deskew: bool = True,
+    mscore_path: str | Path | None = None,
+    preprocess_config: PreprocessConfig | None = None,
+) -> ScoreResult:
+    """편의 진입점: 원본 이미지 파일 경로를 받아 공통 전처리부터 한 번에 수행한다."""
+    input_path = Path(input_path)
+    image = cv2.imread(str(input_path))
+    if image is None:
+        raise FileNotFoundError(f"이미지를 읽을 수 없습니다: {input_path}")
+    preprocessed = run_pipeline(image, preprocess_config)
+    return process_image(
+        preprocessed,
+        output_pdf,
+        output_musicxml=output_musicxml,
+        use_tf=use_tf,
+        deskew=deskew,
+        mscore_path=mscore_path,
+    )

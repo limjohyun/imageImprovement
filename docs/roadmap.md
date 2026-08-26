@@ -36,7 +36,7 @@
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
 | 1 | 악보 OMR 인식 (oemer 연동) | SCR-1 | Phase2#1 | `cfb53ee4` | ✅ 완료 |
-| 2 | 재조판 PDF 생성 (MuseScore 연동) — ⚠️사전 설치: MuseScore 4 | SCR-2 | #1 | `b8cba231` | ⬜ 대기 |
+| 2 | 재조판 PDF 생성 (MuseScore 연동) — ⚠️사전 설치: MuseScore 4 | SCR-2 | #1 | `b8cba231` | ✅ 완료 |
 | 3 | 악보 오류 검수 경로 (외부 편집기 열기, 동일하게 MuseScore 설치 필요) | SCR-3 | #2 | `59367417` | ⬜ 대기 |
 | 4 | GUI에 악보 처리 경로 연결 | — | #3 | `0deef3cf` | ⬜ 대기 |
 | 5 | Phase3 End-to-End 검증 | §9 Phase2/3 | #4 | `96bc862b` | ⬜ 대기 |
@@ -191,6 +191,12 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 이 수정 이후 이전까지 MuseScore 미설치로 항상 skip되던 `tests/fixtures/test_synthetic.py::test_score_photo_via_fixture_or_skips`가 이제 실제로 통과함을 확인(스킵 3건 → 2건, 남은 2건은 오emer 체크포인트 미설치와 Real-ESRGAN 가중치 미지정으로 의도된 결과).
 - 최종 검증: `pytest -q` → 98 passed, 2 skipped(오emer 체크포인트 미설치·Real-ESRGAN 가중치 미지정, 의도된 결과). `ruff check .` → 통과.
 - **Phase2(도형/그래프 처리 + 유형 라우팅 도입) 전체 완료.** 다음은 Phase3(악보 처리) 계속 — Phase3-1(악보 OMR)은 이미 완료(위 참고), 남은 건 Phase3-2(재조판 PDF, MuseScore 연동)부터.
+
+### ✅ Phase3-2: 재조판 PDF 생성 (MuseScore 연동) — 완료
+
+- `python-dev-expert`가 `app/processors/score.py`에 SCR-2 구현 추가: `retypeset_score(musicxml_path, output_pdf, *, mscore_path=None, timeout=120.0)` — `mscore -o output.pdf input.musicxml`을 `subprocess.run([...], shell=False, check=False)`로 호출하고, Phase2-5에서 발견한 MuseScore headless 크래시 리포터 종료 문제(SIGABRT여도 출력 파일은 정상 생성됨)를 반영해 종료 코드가 아니라 실제 출력 파일로 성공을 판단. `find_musescore_executable()`/`_musescore_subprocess_env()`(QT_QPA_PLATFORM 제거)를 프로덕션 코드에 독립 구현(테스트 코드를 프로덕션이 import할 수 없다는 계층 규칙 때문에 `tests/fixtures/synthetic.py`와 의도적으로 중복). `ScoreResult`, `process_image`/`process_image_file`로 SCR-1(OMR)과 SCR-2(재조판)를 연결.
+- `code-reviewer`가 검토해 HIGH 1건 발견 및 실제 재현: 같은 `output_pdf` 경로로 재호출했을 때 mscore가 완전히 실패해도 이전 호출이 남긴 유효한 PDF를 "성공"으로 오인하는 조용한 버그(파일 존재+크기만으로 성공을 판단하는 로직의 근본 결함) — mscore 실행 직전에 기존 출력 파일을 무조건 삭제해 해결(별도 mtime 비교 로직 없이 단순하게 해결). MEDIUM 1건(깨진 MusicXML 입력 시 timeout까지 행(hang)한 뒤 raw `TimeoutExpired`가 그대로 전파) — `ScoreRenderingError`로 감싸서 사용자가 원인을 알 수 있게 수정. LOW 1건(실패 시 mscore stdout/stderr가 로그에 전혀 안 남음) — 실패 경로에서만 `logger.warning`으로 남기도록 수정. 세 건 모두 회귀 테스트 추가로 검증.
+- 최종 검증: `pytest -q` → 106 passed, 2 skipped(oemer 체크포인트 미설치·Real-ESRGAN 가중치 미지정, 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
