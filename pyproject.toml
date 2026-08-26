@@ -16,7 +16,14 @@ requires-python = ">=3.12,<3.13"
 # torch만 base 버전(2.13.0)으로 고정하고 실제 CPU 빌드(+cpu) 선택은
 # README의 별도 인덱스(https://download.pytorch.org/whl/cpu) 설치 단계가 담당한다.
 # vtracer는 Phase2-3(DIA-2 벡터화)에서 실제로 착수해 추가했다.
-# oemer(Phase3), supabase-py(Phase5) 등은 해당 Phase 착수 시점에 추가한다.
+# oemer(Phase3-1, SCR-1)도 착수했지만, PyPI 메타데이터가 macOS에 없는
+# onnxruntime-gpu를 하드 의존성으로 선언해 여기 dependencies에 그냥 추가하면
+# `pip install -e ".[dev]"` 자체가 깨진다. 대신 onnxruntime/scikit-learn/
+# typing-extensions(정상 설치되는 oemer의 실제 런타임 의존성)만 여기 추가하고,
+# oemer 본체는 `scripts/install_oemer.py`(--no-deps 우회 설치, README.md 참고)로
+# 별도 설치한다. matplotlib/scipy도 이번에 oemer가 직접 요구하는 버전으로
+# 명시했다(그동안 realesrgan/basicsr의 전이 의존성으로만 들어와 있었다).
+# supabase-py(Phase5) 등은 해당 Phase 착수 시점에 추가한다.
 dependencies = [
     "opencv-python==5.0.0.93",
     "numpy==2.5.2",
@@ -31,6 +38,11 @@ dependencies = [
     "realesrgan==0.3.0",
     "basicsr==1.4.2",
     "vtracer==0.6.15",
+    "onnxruntime==1.29.0",
+    "scikit-learn==1.9.0",
+    "typing-extensions==4.16.0",
+    "matplotlib==3.11.1",
+    "scipy==1.18.1",
 ]
 
 [project.optional-dependencies]

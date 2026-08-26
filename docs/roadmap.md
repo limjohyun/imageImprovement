@@ -35,7 +35,7 @@
 
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
-| 1 | 악보 OMR 인식 (oemer 연동) | SCR-1 | Phase2#1 | `cfb53ee4` | ⬜ 대기 |
+| 1 | 악보 OMR 인식 (oemer 연동) | SCR-1 | Phase2#1 | `cfb53ee4` | ✅ 완료 |
 | 2 | 재조판 PDF 생성 (MuseScore 연동) — ⚠️사전 설치: MuseScore 4 | SCR-2 | #1 | `b8cba231` | ⬜ 대기 |
 | 3 | 악보 오류 검수 경로 (외부 편집기 열기, 동일하게 MuseScore 설치 필요) | SCR-3 | #2 | `59367417` | ⬜ 대기 |
 | 4 | GUI에 악보 처리 경로 연결 | — | #3 | `0deef3cf` | ⬜ 대기 |
@@ -174,6 +174,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `code-reviewer`가 검토해 MEDIUM 2건 발견: (1) 배치 중 한 페이지만 미구현 유형(SCORE)으로 분류돼도 배치 전체가 완전 실패하고 부분 저장도 불가능하던 문제(줄무늬 배경의 SCORE 오탐 시 실제 발생 가능) — 페이지 단위 실패를 격리해 성공한 페이지만으로도 병합·저장 가능하게 수정, `failed_pages`로 실패 요약을 사용자에게 안내. (2) 벡터화 완료/실패 콜백이 클릭 당시 페이지 기준으로 화면을 갱신해 선택이 바뀐 사이 다른 페이지에 잘못된 상태가 노출되던 문제 — `_is_currently_selected` 가드로 데이터는 항상 갱신하되 화면 갱신만 조건부로 수정. 재검토에서 에러 팝업만 이 가드가 빠진 비대칭을 추가로 발견해(성공 팝업은 가드됨) 반영: 선택된 페이지가 아니면 팝업 대신 상태표시줄에 조용히 안내.
 - 최종 검증: `pytest -q` → 96 passed, 3 skipped(MuseScore·Real-ESRGAN 가중치·oemer 체크포인트 미설치, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 - **Phase2(도형/그래프 처리 + 유형 라우팅 도입) 핵심 파이프라인 전체 완료.** 남은 건 Phase2-5(End-to-End 검증).
+
+### ✅ Phase3-1: 악보 OMR 인식 (oemer 연동) — 완료
+
+- **환경 이슈(실제 재현·해결)**: `oemer==0.1.8`이 PyPI 메타데이터상 `onnxruntime-gpu`(macOS 배포판 없음)를 하드 의존성으로 선언해 `pip install oemer`가 이 머신에서 그대로 실패함을 확인. oemer 코드 자체는 `import onnxruntime`만 하므로 CPU용 `onnxruntime` 설치 후 `pip install oemer==0.1.8 --no-deps`로 우회 가능함을 검증(사용자 승인). `pyproject.toml`의 일반 `dependencies`에는 oemer가 정상 설치되는 `onnxruntime==1.29.0`/`scikit-learn==1.9.0`/`typing-extensions==4.16.0`/`matplotlib==3.11.1`/`scipy==1.18.1`만 추가하고, `oemer` 본체는 `scripts/install_oemer.py`(기존 `scripts/patch_basicsr.py`와 같은 idempotent 후속 설치 스크립트) + `README.md` 절차로 별도 처리.
+- `python-dev-expert`가 구현: `app/processors/score.py`(`recognize_score`/`recognize_score_file` — `oemer.ete.extract()`를 실제 CLI 파서와 동일한 `argparse.Namespace`로 호출, 체크포인트 부재 시 `ScoreModelUnavailableError`로 명확히 실패, `ete.clear_data()`로 oemer 전역 상태 초기화 후 호출). `tests/processors/test_score.py`(체크포인트 없을 때 예외 발생 검증 — 이 머신에서 실제 exercise됨, 체크포인트 있을 때 MusicXML 유효성 검증은 skip).
+- `code-reviewer`가 검토: `argparse.Namespace` 필드와 체크포인트 경로가 실제 oemer 소스와 정확히 일치함을 직접 대조 확인, 레이스 컨디션/색공간 문제 없음 확인. MEDIUM 1건(예외 메시지가 존재하지 않는 `install_oemer.sh`를 가리킴, 실제 파일은 `.py`) 발견해 즉시 수정. LOW 3건(roadmap 갱신 누락 — 이 커밋으로 보완, "파일 읽기+전처리" 5줄 관용구가 `text.py`/`diagram.py`에 이어 3번째로 복붙됨 — 아직 6줄 미만이라 보류, 체크포인트 확인이 `unet_big`만 검사하고 `seg_net`은 안 함 — oemer 자체의 기존 한계를 물려받은 것이라 이번 구현 결함 아님)는 차단 사유 아니라고 판단해 이번엔 반영하지 않음.
+- SCR-2(재조판 PDF, MuseScore 연동)와 라우터 등록(`_PROCESSOR_REGISTRY`에 SCORE 추가)은 의도적으로 범위 밖 — 아직 처리기가 PDF를 만들지 못해 등록해도 의미가 없음(Phase3-2 이후).
+- 최종 검증: `pytest -q` → 96 passed, 3 skipped(MuseScore·Real-ESRGAN 가중치·oemer 체크포인트 미설치, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 

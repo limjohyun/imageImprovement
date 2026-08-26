@@ -34,6 +34,7 @@ source .venv/bin/activate
 .venv/bin/python -m pip install torch==2.13.0
 .venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python scripts/patch_basicsr.py
+.venv/bin/python scripts/install_oemer.py
 ```
 
 macOS에는 CUDA 빌드 자체가 없어서(Windows/Linux처럼 별도 CPU 전용 인덱스를 지정할 필요 없이) 기본 PyPI 인덱스에서 설치해도 자동으로 CPU/MPS 전용 빌드가 설치된다.
@@ -71,6 +72,26 @@ from torchvision.transforms.functional import rgb_to_grayscale
 ```
 
 로 치환한다(이미 패치되어 있으면 아무것도 하지 않음).
+
+### 3. oemer(Phase3 OMR) 설치 (venv 재생성 시 반드시 다시 적용)
+
+`oemer==0.1.8`은 PyPI 메타데이터상 `onnxruntime-gpu`를 하드 의존성으로 선언하는데, 이 패키지는 macOS(Darwin)용 배포판이 PyPI에 전혀 없어 `pip install oemer`를 그대로 실행하면 다음과 같이 실패한다(실제 재현 확인함).
+
+```
+ERROR: No matching distribution found for onnxruntime-gpu
+```
+
+oemer 코드 자체는 `import onnxruntime`만 하고 GPU 전용 API를 강제하지 않으므로, CPU 전용 `onnxruntime`을 먼저 정상 설치해두고(이는 `pyproject.toml`의 일반 dependencies가 책임진다) `oemer` 자체는 `--no-deps`로 설치해 문제되는 의존성 해석을 건너뛴다. 이 때문에 `pyproject.toml`에 `oemer`를 일반 dependencies로 그냥 추가할 수 없다(`pip install -e ".[dev]"`가 oemer의 선언된 메타데이터를 그대로 resolve하려다 다시 실패한다).
+
+`.venv`를 새로 만든 뒤(즉 `pip install -e ".[dev]"`로 onnxruntime 등 정상 의존성을 설치한 뒤) 아래 스크립트를 한 번 실행한다.
+
+```bash
+.venv/bin/python scripts/install_oemer.py
+```
+
+이 스크립트는 `oemer==0.1.8`을 `--no-deps`로 설치한다(이미 설치되어 있으면 아무것도 하지 않음). `opencv-python-headless`(oemer가 원래 요구하는 패키지)는 설치하지 않는다 — 이 프로젝트가 이미 쓰는 `opencv-python`과 같은 `cv2` 네임스페이스를 공유해 충돌하기 때문이다(`--no-deps`로 자동으로 건너뛴다).
+
+OMR 체크포인트(`.onnx`/`.h5`, 수백MB)는 oemer 최초 실행 시 [BreezeWhite/oemer GitHub Releases](https://github.com/BreezeWhite/oemer/releases)에서 자동 다운로드된다. 체크포인트가 없는 상태에서 `app.processors.score.recognize_score()`를 호출하면 `ScoreModelUnavailableError`가 발생하며, 관련 테스트는 이 경우 자동으로 skip된다.
 
 ## Shrimp Task Manager MCP 연결 (선택, 로드맵 관리용)
 
