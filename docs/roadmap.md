@@ -25,7 +25,7 @@
 
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
-| 1 | 문서 유형 라우팅(router) 구현 | RT-1,2 | Phase1#7 | `7ef7d4ad` | ⬜ 대기 |
+| 1 | 문서 유형 라우팅(router) 구현 | RT-1,2 | Phase1#7 | `7ef7d4ad` | ✅ 완료 |
 | 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ⬜ 대기 |
 | 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ⬜ 대기 |
 | 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ⬜ 대기 |
@@ -148,6 +148,12 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 별도로 발견된 코드 결함 없음 — 테스트가 첫 실행에 통과.
 - 최종 검증: `pytest -q` → 69 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 - **Phase1(공통 전처리 + 텍스트 OCR + 최소 GUI) 전체 완료.** 다음은 Phase2(도형/그래프 처리 + 유형 라우팅) 착수.
+
+### ✅ Phase2-1: 문서 유형 라우팅(router) 구현 — 완료
+
+- `python-dev-expert`가 구현: `app/router/classifier.py`(`DocumentType` enum, `classify_document_type(image, *, override=None)` — 오선 검출→도형 컨투어 판정→기본값 TEXT 순서의 결정론적 OpenCV 휴리스틱 3분류, `override` 지정 시 휴리스틱 완전 우회), `app/router/dispatch.py`(`route_and_process` — 분류 결과를 `_PROCESSOR_REGISTRY` dict로 위임, TEXT만 `app.processors.text.process_image`에 실제 연결, DIAGRAM/SCORE는 아직 레지스트리에 없어 `UnsupportedDocumentTypeError`를 명시적으로 던짐), `app/router/__init__.py`(재노출), `tests/router/*`(분류/오버라이드/디스패치 테스트). Phase2-2(도형 처리기)/Phase3-1(악보 처리기)이 생기면 `_PROCESSOR_REGISTRY`에 항목만 추가하면 되는 확장 지점으로 설계.
+- `code-reviewer`가 검토: 크래시/보안/요구사항 위반(HIGH)은 없음. MEDIUM 3건은 휴리스틱 오탐 시나리오(표가 있는 문서→DIAGRAM 오분류, 줄무늬 배경→SCORE 오분류, 텍스트 라벨 없는 단일 대형 도형→TEXT 오분류) — RT-1이 요구하는 수동 오버라이드로 구제 가능하고, 자동 분류 정교화는 로드맵상 Phase4-4("유형 자동 라우팅 정교화")에서 다루기로 이미 계획돼 있어 지금 추가 튜닝하지 않고 알려진 한계로 남기기로 판단(과설계 방지). LOW 1건(빈 이미지/비-uint8 입력 시 원인 불명의 OpenCV 예외 노출)은 공개 API 경계 방어 코드로 저비용 수정 가치가 있어 반영: `_binarize_for_analysis`에 빈 이미지·비-uint8 dtype에 대한 명시적 `ValueError` 가드 추가 및 회귀 테스트 2건 추가.
+- 최종 검증: `pytest -q` → 80 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
