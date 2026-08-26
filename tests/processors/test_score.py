@@ -12,6 +12,8 @@ oemer 체크포인트 유무와는 무관하게(입력은 MusicXML이면 되므�
 
 from __future__ import annotations
 
+import subprocess
+import time
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -25,6 +27,7 @@ from app.processors.score import (
     ScoreRenderingError,
     _checkpoint_path,
     find_musescore_executable,
+    open_score_in_external_editor,
     process_image,
     recognize_score,
     retypeset_score,
@@ -261,3 +264,80 @@ def test_retypeset_score_pdf_compatible_with_pdf_assembly(tmp_path):
     with pymupdf.open(merged_pdf) as merged_doc:
         with pymupdf.open(score_pdf) as score_doc:
             assert merged_doc.page_count == 1 + score_doc.page_count
+
+
+# ---------------------------------------------------------------------------
+# SCR-3: 오류 검수 경로 (외부 편집기 열기)
+# ---------------------------------------------------------------------------
+
+
+def test_open_score_in_external_editor_raises_when_musicxml_missing(tmp_path):
+    """존재하지 않는 MusicXML 경로를 주면 mscore를 실행하지 않고 바로 예외를 던져야 한다."""
+    missing_musicxml = tmp_path / "missing.musicxml"
+
+    with pytest.raises(FileNotFoundError):
+        open_score_in_external_editor(missing_musicxml)
+
+
+def test_open_score_in_external_editor_raises_when_musescore_missing(tmp_path, monkeypatch):
+    """MuseScore 실행 파일을 찾지 못하면 기존 `ScoreRendererUnavailableError`를 재사용해야 한다."""
+    monkeypatch.setattr("app.processors.score.find_musescore_executable", lambda: None)
+
+    musicxml_path = tmp_path / "score.musicxml"
+    _write_synthetic_musicxml(musicxml_path)
+
+    with pytest.raises(ScoreRendererUnavailableError):
+        open_score_in_external_editor(musicxml_path)
+
+
+def test_open_score_in_external_editor_invokes_popen_without_o_flag(tmp_path, monkeypatch):
+    """GUI로 열 땐 `-o` 옵션 없이 파일 경로만 넘기고, `Popen`(비대기)을 써야 한다."""
+    musicxml_path = tmp_path / "score.musicxml"
+    _write_synthetic_musicxml(musicxml_path)
+
+    recorded_calls = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            recorded_calls.append((args, kwargs))
+
+    monkeypatch.setattr("app.processors.score.subprocess.Popen", _FakePopen)
+    monkeypatch.setattr(
+        "app.processors.score.find_musescore_executable", lambda: tmp_path / "fake_mscore"
+    )
+
+    result = open_score_in_external_editor(musicxml_path)
+
+    assert isinstance(result, _FakePopen)
+    assert len(recorded_calls) == 1
+    args, kwargs = recorded_calls[0]
+    assert args == [str(tmp_path / "fake_mscore"), str(musicxml_path)]
+    assert "-o" not in args
+    assert kwargs["shell"] is False
+    assert "QT_QPA_PLATFORM" not in kwargs["env"]
+
+
+def test_open_score_in_external_editor_returns_without_blocking(tmp_path):
+    """`Popen`으로 띄운 프로세스가 끝날 때까지 기다리지 않고 즉시 반환해야 한다.
+
+    수 초간 잠드는 가짜 mscore 스크립트를 써서, 이 함수 호출 자체는 훨씬
+    짧은 시간 안에 반환되는지 검증한다. 테스트 종료 시 고아 프로세스가
+    남지 않도록 반드시 `terminate()`로 정리한다.
+    """
+    musicxml_path = tmp_path / "score.musicxml"
+    _write_synthetic_musicxml(musicxml_path)
+
+    fake_mscore = tmp_path / "fake_mscore_sleep.sh"
+    _write_fake_mscore(fake_mscore, "sleep 5")
+
+    started_at = time.monotonic()
+    process = open_score_in_external_editor(musicxml_path, mscore_path=fake_mscore)
+    elapsed = time.monotonic() - started_at
+
+    try:
+        assert isinstance(process, subprocess.Popen)
+        assert elapsed < 2.0
+        assert process.poll() is None
+    finally:
+        process.terminate()
+        process.wait(timeout=5)

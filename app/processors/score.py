@@ -1,4 +1,4 @@
-"""SCR-1/SCR-2: 악보 OMR(광학 악보 인식) 및 재조판 PDF 생성 처리기.
+"""SCR-1/SCR-2/SCR-3: 악보 OMR(광학 악보 인식), 재조판 PDF 생성, 오류 검수 처리기.
 
 전처리(`app.preprocess`)를 거친 악보 이미지 한 장을 받아 oemer(사전학습 OMR
 모델)로 오선/음표/기호를 인식해 MusicXML 파일을 생성하고(SCR-1),
@@ -8,7 +8,9 @@
 쓴다(`text.py`가 img2pdf 호출을 위해 임시 파일 대신 인코딩 바이트를 쓰는
 것과 달리, oemer는 경로 자체가 필수 인자라 우회할 수 없다).
 
-오류 검수(SCR-3, GUI/외부 편집기 연동)는 이 모듈의 범위 밖이다.
+오류 검수(SCR-3)는 이 프로젝트 범위에서 "MuseScore를 GUI 편집기로 열어
+사용자가 직접 음표/박자를 고치는 다리" 역할로 좁혀뒀다 — 자체 악보 편집기는
+만들지 않는다(`open_score_in_external_editor`).
 """
 
 from __future__ import annotations
@@ -308,4 +310,47 @@ def process_image_file(
         use_tf=use_tf,
         deskew=deskew,
         mscore_path=mscore_path,
+    )
+
+
+# ---------------------------------------------------------------------------
+# SCR-3: 오류 검수 경로 (외부 편집기 열기)
+# ---------------------------------------------------------------------------
+
+
+def open_score_in_external_editor(
+    musicxml_path: str | Path,
+    *,
+    mscore_path: str | Path | None = None,
+) -> subprocess.Popen:
+    """SCR-3: MusicXML을 MuseScore GUI 편집기로 열어 사용자가 직접 오류를 수정하게 한다.
+
+    `retypeset_score`(SCR-2)와 달리 `-o` 출력 옵션 없이 파일 경로만 인자로
+    주면, MuseScore CLI가 헤드리스 변환 대신 GUI를 띄워 해당 파일을 편집
+    상태로 연다(MuseScore CLI 표준 동작). 사용자가 MuseScore 창에서 직접
+    저장하면 같은 경로의 파일이 갱신되는 것으로 충분하며, 이 프로젝트가
+    별도로 변경 감지/재수집할 필요는 없다(재조판은 GUI의 "다시 재조판" 등
+    사용자 명시 동작에 맡긴다, Phase3-4 범위).
+
+    사용자가 MuseScore 창을 켜둔 채로 이 앱을 계속 쓸 수 있어야 하므로,
+    `subprocess.run`처럼 종료까지 기다리지 않고 `subprocess.Popen`으로 띄운
+    뒤 즉시 반환한다. 호출자는 필요하면 반환된 `Popen` 객체로 프로세스
+    상태를 조회할 수 있다.
+    """
+    musicxml_path = Path(musicxml_path)
+    if not musicxml_path.is_file():
+        raise FileNotFoundError(f"MusicXML 파일을 찾을 수 없습니다: {musicxml_path}")
+
+    resolved_mscore = Path(mscore_path) if mscore_path is not None else find_musescore_executable()
+    if resolved_mscore is None:
+        raise ScoreRendererUnavailableError(
+            "MuseScore 실행 파일을 찾을 수 없습니다. `brew install --cask musescore`로 "
+            "설치한 뒤 다시 시도하세요."
+        )
+
+    logger.info("MuseScore 외부 편집기로 MusicXML을 엽니다: %s", musicxml_path)
+    return subprocess.Popen(
+        [str(resolved_mscore), str(musicxml_path)],
+        shell=False,
+        env=_musescore_subprocess_env(),
     )
