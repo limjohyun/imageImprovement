@@ -15,7 +15,8 @@ requires-python = ">=3.12,<3.13"
 # 실제로 한 번 깨진 전례가 있어 버전 드리프트를 막기 위함, scripts/patch_basicsr.py 참고).
 # torch만 base 버전(2.13.0)으로 고정하고 실제 CPU 빌드(+cpu) 선택은
 # README의 별도 인덱스(https://download.pytorch.org/whl/cpu) 설치 단계가 담당한다.
-# vtracer(Phase2), oemer(Phase3), supabase-py(Phase5) 등은 해당 Phase 착수 시점에 추가한다.
+# vtracer는 Phase2-3(DIA-2 벡터화)에서 실제로 착수해 추가했다.
+# oemer(Phase3), supabase-py(Phase5) 등은 해당 Phase 착수 시점에 추가한다.
 dependencies = [
     "opencv-python==5.0.0.93",
     "numpy==2.5.2",
@@ -29,6 +30,7 @@ dependencies = [
     "torch==2.13.0",
     "realesrgan==0.3.0",
     "basicsr==1.4.2",
+    "vtracer==0.6.15",
 ]
 
 [project.optional-dependencies]

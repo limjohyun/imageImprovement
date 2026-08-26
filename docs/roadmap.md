@@ -27,7 +27,7 @@
 |---|---|---|---|---|---|
 | 1 | 문서 유형 라우팅(router) 구현 | RT-1,2 | Phase1#7 | `7ef7d4ad` | ✅ 완료 |
 | 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ✅ 완료 |
-| 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ⬜ 대기 |
+| 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ✅ 완료 |
 | 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ⬜ 대기 |
 | 5 | Phase2 End-to-End 검증 | §9 Phase2/3 | #4 | `d2d67738` | ⬜ 대기 |
 
@@ -160,6 +160,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 구현: `app/processors/diagram.py`(`sharpen_diagram` — 양방향 필터로 업스케일 잔노이즈를 먼저 정리한 뒤 언샤프 마스킹으로 윤곽 강조, `build_diagram_pdf` — `img2pdf`로 텍스트 레이어 없이 이미지를 그대로 PDF 한 장으로 감쌈, `process_image`/`process_image_file` — `text.py`와 동일한 스타일의 진입점). Real-ESRGAN/고전 업스케일(해상도 확대 자체)은 공통 전처리 단계에서 이미 처리되므로 재구현하지 않고 "선명화"에만 집중. `_PROCESSOR_REGISTRY` 호출 규약과 호환되는 시그니처로 만들되 라우터 등록 자체는 Phase2-4로 미룸. `tests/processors/test_diagram.py`(라플라시안 분산 개선, 빈 이미지 예외, PDF 유효성/텍스트 레이어 없음 검증).
 - `code-reviewer`가 검토: 차단급 문제 없음. 색공간/dtype/in-place 오염/이중 업스케일 모두 문제 없음 확인, DIA-2·DIA-3·라우터 등록을 범위에서 뺀 것도 의도된 경계로 판단, 형태학적 선 굵기 보정을 도입하지 않은 판단(반전 정보 없이 적용 시 얇은 선 삭제·인접 도형 병합 위험)도 타당하다고 확인. 경미한 지적 3건 중 미사용 `logger` 변수(죽은 코드)만 제거해 반영. 기본 샤프닝 강도가 다소 공격적이라는 지적과 `_image_to_pdf_bytes`가 `text.py`와 중복이라는 지적은 각각 "실제 사진으로 육안 검수 권장"(시각적 파라미터 튜닝 문제, 자동 테스트로 커버 불가), "Phase3에서 세 번째 processor(`score.py`)가 같은 패턴을 또 복붙하면 그때 공통 유틸로 추출"(지금은 6줄짜리 중복이라 과설계 방지 원칙상 보류)로 판단해 이번엔 반영하지 않음.
 - 최종 검증: `pytest -q` → 84 passed, 2 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase2-3: 도형 벡터화 옵션 + 한계 고지 — 완료
+
+- `pyproject.toml`에 `vtracer==0.6.15`를 신규 의존성으로 추가(Phase별 의존성 도입 원칙에 따라 이번 착수 시점에 추가).
+- `python-dev-expert`가 구현: `app/processors/diagram.py`에 `vectorize_diagram(image, output_svg, **vtracer_params)`(vtracer의 `convert_raw_image_to_svg`로 PNG 바이트를 직접 넘겨 임시 파일 없이 SVG 생성) 추가, `DiagramResult`에 `svg_path`/`vectorization_disclaimer` 필드 추가, `process_image`에 `vectorize: bool = False` 옵션 추가(기본값은 벡터화 미실행, DIA-2 "사용자가 요청 시" 충족). `VECTORIZATION_DISCLAIMER` 상수(DIA-3 한계 고지 문구, "PPTX 수준의 완전 재편집이 아니다")를 처리기 계층에 준비해 Phase2-4에서 GUI가 그대로 가져다 쓸 수 있게 함 — 이번 태스크는 GUI 위젯 자체를 만들지 않음(로드맵이 DIA-3(UI)을 Phase2-4로 이미 분리해둠).
+- `code-reviewer`가 검토: 차단급 문제 없음. vtracer 실제 API 시그니처와 호출 키워드 인자가 정확히 일치함을 `inspect.signature`로 직접 재확인, DIA-2(기본값 미실행)/DIA-3(GUI 분리 경계) 요구사항 부합 확인, `_PROCESSOR_REGISTRY` 하위 호환성 문제 없음 확인. 경미한 지적 4건은 모두 차단 사유가 아니라고 판단해 이번엔 반영하지 않음: (1) vtracer 파라미터 12개를 전부 시그니처에 노출한 것은 다소 앞서간 확장이나 얕은 파라미터 통과라 실질 비용 낮음, (2) PNG 인코딩 3줄 블록이 같은 파일 내에서 두 번째로 중복되나 6줄 미만이라 보류, (3) `output_svg` 기본 경로(`Path(output_pdf).with_suffix(".svg")`)가 `output_pdf`에 이미 `.svg` 확장자가 들어오면 방금 쓴 PDF를 조용히 덮어쓸 수 있음 — **Phase2-4에서 GUI가 파일명을 생성할 때 `.pdf` 확장자가 항상 보장되는지 반드시 확인할 것**, (4) roadmap 서술 섹션 누락(이 커밋으로 보완).
+- 최종 검증: `pytest -q` → 87 passed, 2 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 

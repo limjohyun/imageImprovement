@@ -7,11 +7,20 @@
 
 from __future__ import annotations
 
+import xml.etree.ElementTree as ET
+
 import cv2
 import pymupdf
 
 from app.preprocess.pipeline import PreprocessConfig, run_pipeline
-from app.processors.diagram import DiagramResult, build_diagram_pdf, process_image, sharpen_diagram
+from app.processors.diagram import (
+    VECTORIZATION_DISCLAIMER,
+    DiagramResult,
+    build_diagram_pdf,
+    process_image,
+    sharpen_diagram,
+    vectorize_diagram,
+)
 from tests.fixtures.synthetic import make_diagram_photo
 
 
@@ -73,3 +82,48 @@ def test_process_image_returns_sharpened_image_and_pdf_together(tmp_path):
     assert result.pdf_path == output_pdf
     assert output_pdf.exists()
     assert _laplacian_variance(result.sharpened_image) > _laplacian_variance(processed)
+
+
+def test_process_image_does_not_vectorize_by_default(tmp_path):
+    """DIA-2: "사용자가 요청 시"만 벡터화해야 하므로, 기본값은 벡터화를 실행하지 않아야 한다."""
+    processed = _preprocessed_diagram_photo()
+    output_pdf = tmp_path / "page.pdf"
+
+    result = process_image(processed, output_pdf)
+
+    assert result.svg_path is None
+    assert result.vectorization_disclaimer is None
+    # output_pdf와 같은 이름의 .svg가 요청하지 않았는데 생겨서는 안 된다.
+    assert not output_pdf.with_suffix(".svg").exists()
+
+
+def test_vectorize_diagram_creates_valid_svg(tmp_path):
+    """DIA-2: 벡터화 결과가 실제로 파싱 가능한 최소 구조의 SVG 파일이어야 한다."""
+    processed = _preprocessed_diagram_photo()
+    sharpened = sharpen_diagram(processed)
+    output_svg = tmp_path / "diagram.svg"
+
+    result_path = vectorize_diagram(sharpened, output_svg)
+
+    assert result_path == output_svg
+    assert output_svg.exists()
+
+    root = ET.fromstring(output_svg.read_text(encoding="utf-8"))
+    assert root.tag.endswith("svg")
+    assert root.attrib.get("width")
+    assert root.attrib.get("height")
+
+
+def test_process_image_with_vectorize_true_returns_svg_and_disclaimer(tmp_path):
+    """DIA-2/DIA-3: 벡터화를 요청하면 SVG 경로와 한계 고지 문구가 함께 채워져야 한다."""
+    processed = _preprocessed_diagram_photo()
+    output_pdf = tmp_path / "page.pdf"
+
+    result = process_image(processed, output_pdf, vectorize=True)
+
+    assert result.svg_path is not None
+    assert result.svg_path.exists()
+    assert result.vectorization_disclaimer == VECTORIZATION_DISCLAIMER
+    # PPTX 수준의 완전 재편집이 아니라는 취지가 실제로 문구에 담겨 있어야 한다.
+    disclaimer = result.vectorization_disclaimer
+    assert "PPTX" in disclaimer or "PowerPoint" in disclaimer
