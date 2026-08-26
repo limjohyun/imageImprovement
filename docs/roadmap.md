@@ -29,7 +29,7 @@
 | 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ✅ 완료 |
 | 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ✅ 완료 |
 | 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ✅ 완료 |
-| 5 | Phase2 End-to-End 검증 | §9 Phase2/3 | #4 | `d2d67738` | ⬜ 대기 |
+| 5 | Phase2 End-to-End 검증 | §9 Phase2/3 | #4 | `d2d67738` | ✅ 완료 |
 
 ## Phase 3 — 악보 처리 (OMR)
 
@@ -182,6 +182,15 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `code-reviewer`가 검토: `argparse.Namespace` 필드와 체크포인트 경로가 실제 oemer 소스와 정확히 일치함을 직접 대조 확인, 레이스 컨디션/색공간 문제 없음 확인. MEDIUM 1건(예외 메시지가 존재하지 않는 `install_oemer.sh`를 가리킴, 실제 파일은 `.py`) 발견해 즉시 수정. LOW 3건(roadmap 갱신 누락 — 이 커밋으로 보완, "파일 읽기+전처리" 5줄 관용구가 `text.py`/`diagram.py`에 이어 3번째로 복붙됨 — 아직 6줄 미만이라 보류, 체크포인트 확인이 `unet_big`만 검사하고 `seg_net`은 안 함 — oemer 자체의 기존 한계를 물려받은 것이라 이번 구현 결함 아님)는 차단 사유 아니라고 판단해 이번엔 반영하지 않음.
 - SCR-2(재조판 PDF, MuseScore 연동)와 라우터 등록(`_PROCESSOR_REGISTRY`에 SCORE 추가)은 의도적으로 범위 밖 — 아직 처리기가 PDF를 만들지 못해 등록해도 의미가 없음(Phase3-2 이후).
 - 최종 검증: `pytest -q` → 96 passed, 3 skipped(MuseScore·Real-ESRGAN 가중치·oemer 체크포인트 미설치, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase2-5: Phase2 End-to-End 검증 — 완료 (Phase2 전체 완료)
+
+- `qa-test-engineer`가 `tests/gui/test_e2e_phase2.py`에 §9 Phase2 수용 기준("도형 샘플로 텍스트와 동일한 end-to-end 확인")을 검증하는 테스트를 작성. `synthetic_diagram_photo`(왜곡·저해상도 합성 도형 이미지)를 실제 `MainWindow`를 통해 입력(GUI-1)→백그라운드 처리(QThread, 자동 분류로 실제 `DocumentType.DIAGRAM` 판정 확인)→미리보기(GUI-2)→도형 전용 검수 안내(GUI-3)→벡터화 버튼 클릭 후 SVG 생성 및 한계 고지 노출(DIA-2/3)→저장(GUI-4)까지 한 흐름으로 잇고, 저장된 PDF가 유효하며 텍스트 레이어가 없음(도형은 TXT-2와 무관)을 확인. 악보(score) 샘플 E2E는 SCR-2/3과 GUI 연결이 아직 없어 이번 범위에서 제외, Phase3-5로 미룸.
+- 별도로 발견된 프로덕션 코드 결함 없음 — 테스트가 첫 실행에 통과.
+- **환경 이슈 발견 및 해결(MuseScore 4 headless 실행)**: 이 태스크 진행 중 사용자 승인을 받아 `brew install --cask musescore`로 MuseScore 4를 설치했는데, 그 직후 기존에 skip 처리되던 악보 fixture(`tests/fixtures/synthetic.py`)가 처음으로 실제 실행되면서 두 가지 환경 문제가 실제로 재현됐다: (1) pytest-qt용 `QT_QPA_PLATFORM=offscreen`이 `mscore` 자식 프로세스에 그대로 상속되면 MuseScore가 번들한 Qt에는 "offscreen" 플랫폼 플러그인이 없어("cocoa"만 있음) 즉시 크래시함 — `_musescore_subprocess_env()`로 자식 프로세스 환경에서 이 변수를 제거해 해결. (2) 그 문제를 고친 뒤에도, 이 macOS 환경에서 MuseScore 4가 PNG를 정상적으로 다 쓴 *뒤에* 자체 크래시 리포터(Crashpad) 종료 경로에서 SIGABRT로 죽는 현상이 재현됨(GUI 세션 없이 headless로 반복 실행할 때 흔한 셧다운 버그로 보이며 렌더링 자체의 실패가 아님, 실제로 종료코드와 무관하게 유효한 PNG 파일이 만들어져 있음을 확인) — `subprocess.run`의 `check=True`를 제거하고 실제 출력 파일 존재 여부로 성공을 판단하도록 수정. 두 수정 모두 `tests/fixtures/synthetic.py`에 반영.
+- 이 수정 이후 이전까지 MuseScore 미설치로 항상 skip되던 `tests/fixtures/test_synthetic.py::test_score_photo_via_fixture_or_skips`가 이제 실제로 통과함을 확인(스킵 3건 → 2건, 남은 2건은 오emer 체크포인트 미설치와 Real-ESRGAN 가중치 미지정으로 의도된 결과).
+- 최종 검증: `pytest -q` → 98 passed, 2 skipped(오emer 체크포인트 미설치·Real-ESRGAN 가중치 미지정, 의도된 결과). `ruff check .` → 통과.
+- **Phase2(도형/그래프 처리 + 유형 라우팅 도입) 전체 완료.** 다음은 Phase3(악보 처리) 계속 — Phase3-1(악보 OMR)은 이미 완료(위 참고), 남은 건 Phase3-2(재조판 PDF, MuseScore 연동)부터.
 
 ## 다음 진행 방식
 

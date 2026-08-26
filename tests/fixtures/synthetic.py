@@ -15,6 +15,7 @@ Phase1-2(공통 전처리)부터 이후 모든 Phase의 pytest가 재사용하�
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import tempfile
@@ -330,6 +331,21 @@ def _build_synthetic_score():
     return score
 
 
+def _musescore_subprocess_env() -> dict[str, str]:
+    """MuseScore CLI 호출용 환경변수를 만든다.
+
+    이 프로젝트의 GUI/pytest-qt 테스트는 headless 실행을 위해 `QT_QPA_PLATFORM=offscreen`을
+    사용하는데(README 참고), MuseScore 4가 번들한 Qt는 "offscreen" 플랫폼 플러그인을
+    포함하지 않고 "cocoa"만 제공한다. 이 환경변수가 그대로 상속되면 `mscore` 프로세스가
+    "Could not find the Qt platform plugin"으로 즉시 SIGABRT 크래시한다(실제 재현 확인함).
+    PySide6 앱(이 프로세스)과 MuseScore(별도 Qt를 내장한 자식 프로세스)의 요구사항이
+    서로 충돌하므로, MuseScore 자식 프로세스에는 이 변수를 제거한 환경을 넘긴다.
+    """
+    env = os.environ.copy()
+    env.pop("QT_QPA_PLATFORM", None)
+    return env
+
+
 def _render_score_to_image(mscore_path: Path, tmp_dir: Path) -> np.ndarray:
     """music21 악보를 MusicXML로 내보낸 뒤 MuseScore CLI로 PNG 렌더링한다."""
     score = _build_synthetic_score()
@@ -337,12 +353,18 @@ def _render_score_to_image(mscore_path: Path, tmp_dir: Path) -> np.ndarray:
     score.write("musicxml", fp=str(musicxml_path))
 
     png_path = tmp_dir / "score.png"
+    # `check=True`를 쓰지 않는다: 이 macOS 환경에서 MuseScore 4는 PNG를 정상적으로 다 쓴
+    # *뒤에* 자체 크래시 리포터(Crashpad) 종료 경로에서 SIGABRT로 죽는 경우가 실제로
+    # 재현된다("mutex lock failed" — GUI 세션 없이 headless로 반복 실행할 때 흔한
+    # Crashpad 셧다운 버그로 보이며, 렌더링 자체의 실패가 아니다). 그래서 종료 코드로
+    # 성공 여부를 판단하지 않고, 아래에서 실제로 유효한 PNG가 만들어졌는지로 판단한다.
     subprocess.run(
         [str(mscore_path), "-o", str(png_path), str(musicxml_path)],
         shell=False,
-        check=True,
+        check=False,
         capture_output=True,
         timeout=60,
+        env=_musescore_subprocess_env(),
     )
 
     # MuseScore는 페이지가 1장이어도 파일명에 "-1"을 붙여 내보낸다.
