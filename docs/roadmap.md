@@ -26,7 +26,7 @@
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
 | 1 | 문서 유형 라우팅(router) 구현 | RT-1,2 | Phase1#7 | `7ef7d4ad` | ✅ 완료 |
-| 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ⬜ 대기 |
+| 2 | 도형 선명화 | DIA-1 | #1 | `150b2fa8` | ✅ 완료 |
 | 3 | 도형 벡터화 옵션 + 한계 고지 | DIA-2,3 | #2 | `5b71299b` | ⬜ 대기 |
 | 4 | GUI에 도형 처리 경로 연결 | DIA-3(UI) | #3 | `0d043c72` | ⬜ 대기 |
 | 5 | Phase2 End-to-End 검증 | §9 Phase2/3 | #4 | `d2d67738` | ⬜ 대기 |
@@ -154,6 +154,12 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 구현: `app/router/classifier.py`(`DocumentType` enum, `classify_document_type(image, *, override=None)` — 오선 검출→도형 컨투어 판정→기본값 TEXT 순서의 결정론적 OpenCV 휴리스틱 3분류, `override` 지정 시 휴리스틱 완전 우회), `app/router/dispatch.py`(`route_and_process` — 분류 결과를 `_PROCESSOR_REGISTRY` dict로 위임, TEXT만 `app.processors.text.process_image`에 실제 연결, DIAGRAM/SCORE는 아직 레지스트리에 없어 `UnsupportedDocumentTypeError`를 명시적으로 던짐), `app/router/__init__.py`(재노출), `tests/router/*`(분류/오버라이드/디스패치 테스트). Phase2-2(도형 처리기)/Phase3-1(악보 처리기)이 생기면 `_PROCESSOR_REGISTRY`에 항목만 추가하면 되는 확장 지점으로 설계.
 - `code-reviewer`가 검토: 크래시/보안/요구사항 위반(HIGH)은 없음. MEDIUM 3건은 휴리스틱 오탐 시나리오(표가 있는 문서→DIAGRAM 오분류, 줄무늬 배경→SCORE 오분류, 텍스트 라벨 없는 단일 대형 도형→TEXT 오분류) — RT-1이 요구하는 수동 오버라이드로 구제 가능하고, 자동 분류 정교화는 로드맵상 Phase4-4("유형 자동 라우팅 정교화")에서 다루기로 이미 계획돼 있어 지금 추가 튜닝하지 않고 알려진 한계로 남기기로 판단(과설계 방지). LOW 1건(빈 이미지/비-uint8 입력 시 원인 불명의 OpenCV 예외 노출)은 공개 API 경계 방어 코드로 저비용 수정 가치가 있어 반영: `_binarize_for_analysis`에 빈 이미지·비-uint8 dtype에 대한 명시적 `ValueError` 가드 추가 및 회귀 테스트 2건 추가.
 - 최종 검증: `pytest -q` → 80 passed, 2 skipped(MuseScore 미설치·Real-ESRGAN 가중치 미지정, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase2-2: 도형 선명화 — 완료
+
+- `python-dev-expert`가 구현: `app/processors/diagram.py`(`sharpen_diagram` — 양방향 필터로 업스케일 잔노이즈를 먼저 정리한 뒤 언샤프 마스킹으로 윤곽 강조, `build_diagram_pdf` — `img2pdf`로 텍스트 레이어 없이 이미지를 그대로 PDF 한 장으로 감쌈, `process_image`/`process_image_file` — `text.py`와 동일한 스타일의 진입점). Real-ESRGAN/고전 업스케일(해상도 확대 자체)은 공통 전처리 단계에서 이미 처리되므로 재구현하지 않고 "선명화"에만 집중. `_PROCESSOR_REGISTRY` 호출 규약과 호환되는 시그니처로 만들되 라우터 등록 자체는 Phase2-4로 미룸. `tests/processors/test_diagram.py`(라플라시안 분산 개선, 빈 이미지 예외, PDF 유효성/텍스트 레이어 없음 검증).
+- `code-reviewer`가 검토: 차단급 문제 없음. 색공간/dtype/in-place 오염/이중 업스케일 모두 문제 없음 확인, DIA-2·DIA-3·라우터 등록을 범위에서 뺀 것도 의도된 경계로 판단, 형태학적 선 굵기 보정을 도입하지 않은 판단(반전 정보 없이 적용 시 얇은 선 삭제·인접 도형 병합 위험)도 타당하다고 확인. 경미한 지적 3건 중 미사용 `logger` 변수(죽은 코드)만 제거해 반영. 기본 샤프닝 강도가 다소 공격적이라는 지적과 `_image_to_pdf_bytes`가 `text.py`와 중복이라는 지적은 각각 "실제 사진으로 육안 검수 권장"(시각적 파라미터 튜닝 문제, 자동 테스트로 커버 불가), "Phase3에서 세 번째 processor(`score.py`)가 같은 패턴을 또 복붙하면 그때 공통 유틸로 추출"(지금은 6줄짜리 중복이라 과설계 방지 원칙상 보류)로 판단해 이번엔 반영하지 않음.
+- 최종 검증: `pytest -q` → 84 passed, 2 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
