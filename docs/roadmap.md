@@ -39,7 +39,7 @@
 | 2 | 재조판 PDF 생성 (MuseScore 연동) — ⚠️사전 설치: MuseScore 4 | SCR-2 | #1 | `b8cba231` | ✅ 완료 |
 | 3 | 악보 오류 검수 경로 (외부 편집기 열기, 동일하게 MuseScore 설치 필요) | SCR-3 | #2 | `59367417` | ✅ 완료 |
 | 4 | GUI에 악보 처리 경로 연결 | — | #3 | `0deef3cf` | ✅ 완료 |
-| 5 | Phase3 End-to-End 검증 | §9 Phase2/3 | #4 | `96bc862b` | ⬜ 대기 |
+| 5 | Phase3 End-to-End 검증 | §9 Phase2/3 | #4 | `96bc862b` | ✅ 완료 |
 
 ## Phase 4 — GUI 고도화
 
@@ -210,6 +210,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 진행 중 인프라 이슈(코드 결함 아님): 구현/리뷰 에이전트가 각각 한 번씩 "600초간 진행 없음(stream watchdog)"으로 stall되어 실패 보고가 왔으나, 실제 파일 변경은 정상적으로 디스크에 반영되어 있었음을 직접 확인(구현 완료 상태였음). 이어서 `pytest` 전체 실행 시 `retypeset_score` 관련 4건이 실패했는데, 원인은 코드가 아니라 `/Applications/MuseScore 4.app`이 (원인 불명으로) 휴지통으로 이동되어 있었고 brew의 `mscore` 심볼릭 링크가 깨져 있었던 것 — 휴지통에서 앱을 복원하고, 이동 과정에서 다시 붙은 `com.apple.quarantine` 속성을 제거해 해결(둘 다 로컬 환경 문제, 코드 변경 없음).
 - `code-reviewer`가 새 에이전트로 재검토(이전 리뷰 에이전트는 stall로 결과 없이 실패): 차단급(HIGH) 문제 없음. MEDIUM 1건 — `_on_open_in_musescore_clicked`가 `ScoreRendererUnavailableError`/`FileNotFoundError`만 잡고 `Popen`이 던질 수 있는 일반 `OSError`(예: 손상된 바이너리 실행 권한 오류)는 처리하지 않음, Phase3-3 리뷰 시점에 이미 "Phase3-4에서 다룰 사항"으로 이월돼 있던 항목이라 이번에 반영 — `except OSError`로 확장해 `QMessageBox.critical`로 노출. LOW 3건 중 실제 코드로 반영한 것은 1건(`self._open_musescore_processes`가 종료된 프로세스도 계속 쌓여 무한정 커질 수 있음 — 클릭할 때마다 `p.poll() is None`으로 필터링해 정리). 나머지 2건(MuseScore에서 저장한 수정본을 앱에 다시 반영하는 "재조판" 흐름 부재는 코드 결함이 아니라 스코프 확인 사항으로 Phase4-2 검토 대상으로 남김, 버튼 연타 시 MuseScore 인스턴스가 중복 실행될 수 있는 점은 정보성으로 남김)는 PRD/roadmap 요구사항이 아니고 이 개인용 도구 특성상 리스크가 낮아 반영하지 않음.
 - 최종 검증: `pytest -q` → 116 passed, 2 skipped(oemer 체크포인트 미설치·Real-ESRGAN 가중치 미지정, 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase3-5: Phase3 End-to-End 검증 — 완료 (Phase3 전체 완료)
+
+- `qa-test-engineer`가 `tests/gui/test_e2e_phase3.py`에 §9 Phase3 수용 기준을 검증하는 테스트 2건을 작성. (1) `test_phase3_end_to_end_distorted_score_photo_to_pdf`: Phase2와 동일한 패턴으로 악보 샘플을 실제 `MainWindow`에 입력→처리→자동 분류(`DocumentType.SCORE`)→미리보기→악보 전용 검수 UI("MuseScore에서 열기" 버튼 활성화 확인, 실제 클릭은 하지 않음)→저장까지 잇는 정식 happy-path지만, 이 머신엔 oemer 체크포인트가 없어 `pytest.skip`(체크포인트가 준비된 머신/CI에서만 실제 실행). (2) `test_phase3_gracefully_isolates_score_page_when_checkpoint_missing`: 이 머신의 실제 현실(체크포인트 없음) 그대로 텍스트+악보 샘플을 함께 입력해, 텍스트는 성공·악보는 `ScoreModelUnavailableError`로 페이지 격리되는 부분 성공 흐름이 크래시 없이 끝까지 도는지 실제로 검증 — 이 테스트는 이 머신에서 실제로 PASS함.
+- Phase2-5와 마찬가지로 테스트 전용 변경(프로덕션 코드 수정 없음)이라 별도 `code-reviewer` 단계 없이 진행. 발견된 프로덕션 결함 없음.
+- 최종 검증: `pytest -q` → 117 passed, 3 skipped(oemer 체크포인트 미설치 2건 + Real-ESRGAN 가중치 미지정 1건, 모두 기존/의도된 결과). `ruff check .` → 통과.
+- **Phase3(악보 처리, OMR) 전체 완료.**
 
 ## 다음 진행 방식
 
