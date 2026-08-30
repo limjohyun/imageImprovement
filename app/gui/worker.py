@@ -1,16 +1,21 @@
-"""Phase1-5(GUI-1,2,4)+Phase2-4(DIA-3 UI): 파이프라인 전체를 백그라운드 스레드에서 실행하는 워커.
+"""Phase1-5(GUI-1,2,4)+Phase2-4(DIA-3 UI)+Phase3-4(SCR-3 UI): 파이프라인 전체를 백그라운드
+스레드에서 실행하는 워커.
 
 전처리(`app.preprocess`) + 라우팅(`app.router`) + 처리기(`app.processors.*`) +
 PDF 병합(`app.pdf_assembly`)은 모두 무거운 연산(업스케일, Tesseract, OCRmyPDF/
-Ghostscript 서브프로세스 호출, vtracer 등)이므로 GUI 메인 스레드에서 그대로
-호출하면 UI가 블로킹된다. `QThread`를 상속해 이 전체 과정을 별도 스레드에서
-실행한다.
+Ghostscript 서브프로세스 호출, vtracer, oemer/MuseScore 등)이므로 GUI 메인
+스레드에서 그대로 호출하면 UI가 블로킹된다. `QThread`를 상속해 이 전체 과정을
+별도 스레드에서 실행한다.
 
 `ProcessingWorker`는 이미지 목록을 순회하며 각 페이지를 자동 분류(`DocumentType`)한
-뒤 알맞은 처리기(텍스트/도형)로 위임한다 — 수동 오버라이드 UI는 Phase4-4로 미룬
+뒤 알맞은 처리기(텍스트/도형/악보)로 위임한다 — 수동 오버라이드 UI는 Phase4-4로 미룬
 범위 밖이므로 항상 자동 분류(`override=None`)만 사용한다. `VectorizeWorker`는
 이미 도형으로 처리된 페이지 한 장에 대해 사용자가 명시적으로 "SVG로 벡터화"를
 요청했을 때만 별도로 실행되는 훨씬 가벼운 워커다(DIA-2).
+
+악보 페이지의 오류 검수(SCR-3, "MuseScore에서 열기")는 `subprocess.Popen`으로 이미
+비블로킹이라 `VectorizeWorker` 같은 별도 QThread가 필요 없다 — 호출부(`MainWindow`)가
+`app.processors.score.open_score_in_external_editor`를 직접 호출하면 된다.
 
 QThread가 기본 제공하는 `finished` 시그널(인자 없음)을 그대로 사용한다 — 이 시그널을
 커스텀 시그널로 덮어쓰면 pytest-qt 공식 예제(`qtbot.waitSignal(worker.finished, ...)`,
@@ -20,10 +25,11 @@ https://pytest-qt.readthedocs.io/en/latest/signals.html)가 기대하는 스레�
 속성(`merged_pdf_path`, `page_results`, `svg_path`)에 남겨둔다. `finished` 시그널을
 받은 뒤 호출부가 해당 속성을 직접 읽으면 되므로 별도의 결과 전달용 시그널은 두지 않는다.
 
-배치 중 한 페이지가 (예: 줄무늬 배경이 오선으로 오검출되어 `SCORE`로 잘못 분류되는
-등) 아직 구현되지 않은 유형으로 라우팅되어 실패하더라도, 그 한 장 때문에 이미 성공한
-나머지 페이지 결과까지 버리지 않는다 — 페이지 단위 실패는 `failed_pages`에 모으고
-계속 진행하며, 성공한 페이지가 하나라도 있으면 그것만으로 병합 PDF를 만든다.
+배치 중 한 페이지가 (예: 줄무늬 배경이 오선으로 오검출되어 `SCORE`로 잘못 분류되거나,
+악보로 정확히 분류됐지만 oemer OMR 체크포인트가 로컬에 없어 `ScoreModelUnavailableError`가
+나는 등) 어떤 이유로든 처리에 실패하더라도, 그 한 장 때문에 이미 성공한 나머지 페이지
+결과까지 버리지 않는다 — 페이지 단위 실패는 `failed_pages`에 모으고 계속 진행하며,
+성공한 페이지가 하나라도 있으면 그것만으로 병합 PDF를 만든다.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ from app.pdf_assembly.assemble import assemble_pdf
 from app.preprocess.pipeline import PreprocessConfig, run_pipeline
 from app.processors.diagram import DiagramResult
 from app.processors.diagram import vectorize_diagram as _vectorize_diagram
+from app.processors.score import ScoreResult
 from app.processors.text import TextOcrResult
 from app.router.classifier import DocumentType, classify_document_type
 from app.router.dispatch import UnsupportedDocumentTypeError, route_and_process
@@ -53,8 +60,8 @@ class PageResult:
 
     `input_path`/`page_pdf_path`/`text` 세 필드는 Phase1부터 있던 필드로, 기존
     호출부(테스트 포함)가 키워드 인자로 직접 `PageResult(...)`를 생성하고 있어
-    이름과 호출 방식을 바꾸지 않는다. Phase2-4에서 추가된 필드는 모두 기본값이
-    있는 키워드 전용 확장이다.
+    이름과 호출 방식을 바꾸지 않는다. Phase2-4/Phase3-4에서 추가된 필드는 모두
+    기본값이 있는 키워드 전용 확장이다.
     """
 
     input_path: Path
@@ -74,6 +81,10 @@ class PageResult:
 
     vectorization_disclaimer: str | None = None
     """DIA-3: `svg_path`가 채워졌을 때만 함께 채워지는 한계 고지 문구."""
+
+    musicxml_path: Path | None = None
+    """SCR-3: 악보로 분류된 페이지에서만 채워지는 OMR 인식 MusicXML 경로.
+    "MuseScore에서 열기" 버튼이 이 값으로 외부 편집기를 연다."""
 
 
 class ProcessingWorker(QThread):
@@ -200,10 +211,17 @@ class ProcessingWorker(QThread):
                 svg_path=result.svg_path,
                 vectorization_disclaimer=result.vectorization_disclaimer,
             )
-        # route_and_process가 미구현 유형(예: SCORE)에 대해서는 이미
-        # UnsupportedDocumentTypeError를 던지므로 정상 흐름에서는 도달하지 않는다.
-        # 향후 새 처리기가 등록됐는데 여기 변환 로직을 깜빡 잊는 실수를 조용히
-        # 넘기지 않기 위한 안전망이다.
+        if isinstance(result, ScoreResult):
+            return PageResult(
+                input_path=image_path,
+                page_pdf_path=result.pdf_path,
+                text=None,
+                document_type=document_type,
+                musicxml_path=result.musicxml_path,
+            )
+        # route_and_process가 미구현 유형에 대해서는 이미 UnsupportedDocumentTypeError를
+        # 던지므로 정상 흐름에서는 도달하지 않는다. 향후 새 처리기가 등록됐는데 여기
+        # 변환 로직을 깜빡 잊는 실수를 조용히 넘기지 않기 위한 안전망이다.
         raise UnsupportedDocumentTypeError(
             f"'{document_type.value}' 처리 결과를 PageResult로 변환할 방법이 없습니다."
         )

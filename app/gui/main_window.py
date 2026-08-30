@@ -19,6 +19,15 @@ Phase2-4(DIA-3 UI): `ProcessingWorker`가 자동 분류(`DocumentType`)까지 �
 때만 `VectorizeWorker`(별도 QThread)로 실행하고, 결과의 한계 고지 문구
 (`VECTORIZATION_DISCLAIMER`)는 팝업(`QMessageBox.information`)과 상시 라벨
 양쪽에 노출해 사용자가 놓치지 않게 한다.
+
+Phase3-4(SCR-3 UI): 악보로 분류된 페이지도 도형과 마찬가지로 텍스트 검수 패널
+대신 전용 안내를 보여준다. 대신 벡터화 버튼 자리에 "MuseScore에서 열기" 버튼을
+두어, `PageResult.musicxml_path`가 채워져 있을 때만 활성화하고 클릭 시
+`open_score_in_external_editor`로 MuseScore를 GUI 모드로 비블로킹 실행한다.
+`open_score_in_external_editor`는 이미 `subprocess.Popen`으로 즉시 반환하므로
+`VectorizeWorker` 같은 별도 QThread가 필요 없다 — 다만 반환된 `Popen`을 계속
+참조로 들고 있지 않으면 프로세스가 실행 중일 때 GC되어 `ResourceWarning`이 날 수
+있으므로, `self._open_musescore_processes` 리스트에 계속 보관한다.
 """
 
 from __future__ import annotations
@@ -49,6 +58,7 @@ from PySide6.QtWidgets import (
 
 from app.gui.worker import PageResult, ProcessingWorker, VectorizeWorker
 from app.processors.diagram import VECTORIZATION_DISCLAIMER
+from app.processors.score import ScoreRendererUnavailableError, open_score_in_external_editor
 from app.router.classifier import DocumentType
 
 logger = logging.getLogger(__name__)
@@ -91,6 +101,10 @@ class MainWindow(QMainWindow):
 
         self._worker: ProcessingWorker | None = None
         self._vectorize_worker: VectorizeWorker | None = None
+        self._open_musescore_processes: list = []
+        """SCR-3: `open_score_in_external_editor`가 반환한 `subprocess.Popen`을 계속
+        참조로 들고 있기 위한 리스트. 참조를 놓으면 프로세스가 아직 실행 중일 때
+        CPython이 GC하면서 `ResourceWarning`을 낼 수 있다(code-reviewer 지적 사항)."""
         self._work_dir: Path | None = None
         self._results_by_input: dict[str, PageResult] = {}
         self._merged_pdf_path: Path | None = None
@@ -153,6 +167,7 @@ class MainWindow(QMainWindow):
         right_column = QVBoxLayout()
         right_column.addWidget(self._build_text_review_group(), stretch=1)
         right_column.addWidget(self._build_diagram_group())
+        right_column.addWidget(self._build_score_group())
         layout.addLayout(right_column, stretch=1)
 
         return layout
@@ -184,6 +199,19 @@ class MainWindow(QMainWindow):
         disclaimer_label.setWordWrap(True)
         group_layout.addWidget(disclaimer_label)
         self.vectorization_disclaimer_label = disclaimer_label
+
+        return group
+
+    def _build_score_group(self) -> QGroupBox:
+        """SCR-3: 악보로 분류된 페이지를 MuseScore GUI 편집기로 열어 오류를 직접 고치는 패널."""
+        group = QGroupBox("악보 검수")
+        group_layout = QVBoxLayout(group)
+
+        button = QPushButton("MuseScore에서 열기")
+        button.setEnabled(False)
+        button.clicked.connect(self._on_open_in_musescore_clicked)
+        group_layout.addWidget(button)
+        self.open_in_musescore_button = button
 
         return group
 
@@ -369,6 +397,7 @@ class MainWindow(QMainWindow):
         self._refresh_processed_preview(path)
         self._refresh_text_review(path)
         self._refresh_diagram_panel(path)
+        self._refresh_score_panel(path)
 
     def _refresh_preview_if_selected(self, input_path: Path) -> None:
         items = self.file_list_widget.selectedItems()
@@ -379,6 +408,7 @@ class MainWindow(QMainWindow):
             self._refresh_processed_preview(selected_path)
             self._refresh_text_review(selected_path)
             self._refresh_diagram_panel(selected_path)
+            self._refresh_score_panel(selected_path)
 
     def _show_original_preview(self, path: Path) -> None:
         pixmap = QPixmap(str(path))
@@ -434,6 +464,12 @@ class MainWindow(QMainWindow):
                 self.text_review_edit.clear()
                 self.text_review_edit.setPlaceholderText("아직 처리되지 않았습니다.")
                 self.text_review_edit.setEnabled(False)
+            elif result.document_type == DocumentType.SCORE:
+                self.text_review_edit.clear()
+                self.text_review_edit.setPlaceholderText(
+                    "이 페이지는 악보로 분류되어 텍스트 검수 대상이 아닙니다."
+                )
+                self.text_review_edit.setEnabled(False)
             elif result.document_type != DocumentType.TEXT:
                 self.text_review_edit.clear()
                 self.text_review_edit.setPlaceholderText(
@@ -456,18 +492,31 @@ class MainWindow(QMainWindow):
         else:
             self.vectorization_disclaimer_label.setText("")
 
-    def _reset_text_review_panel(self) -> None:
-        """새 배치 처리를 시작할 때 검수/벡터화 패널을 초기화한다.
+    def _refresh_score_panel(self, path: Path) -> None:
+        """SCR-3: 악보 페이지이고 MusicXML이 준비됐을 때만 "MuseScore에서 열기" 버튼을
+        활성화한다."""
+        result = self._results_by_input.get(str(path.resolve()))
+        can_open = (
+            result is not None
+            and result.document_type == DocumentType.SCORE
+            and result.musicxml_path is not None
+        )
+        self.open_in_musescore_button.setEnabled(can_open)
 
-        현재 선택된 페이지가 있으면 `_refresh_text_review`/`_refresh_diagram_panel`로
-        위임해 "아직 처리되지 않았습니다" 상태를 보여주고(선택은 유지되므로 이쪽이
-        더 정확한 문구다), 선택된 페이지가 없으면 안내 문구만 되돌린다.
+    def _reset_text_review_panel(self) -> None:
+        """새 배치 처리를 시작할 때 검수/벡터화/악보 검수 패널을 초기화한다.
+
+        현재 선택된 페이지가 있으면 `_refresh_text_review`/`_refresh_diagram_panel`/
+        `_refresh_score_panel`로 위임해 "아직 처리되지 않았습니다" 상태를 보여주고
+        (선택은 유지되므로 이쪽이 더 정확한 문구다), 선택된 페이지가 없으면 안내
+        문구만 되돌린다.
         """
         items = self.file_list_widget.selectedItems()
         if items:
             path = Path(items[0].data(_PATH_ROLE))
             self._refresh_text_review(path)
             self._refresh_diagram_panel(path)
+            self._refresh_score_panel(path)
             return
         self._reviewed_input_path = None
         with QSignalBlocker(self.text_review_edit):
@@ -476,6 +525,7 @@ class MainWindow(QMainWindow):
             self.text_review_edit.setEnabled(False)
         self.vectorize_button.setEnabled(False)
         self.vectorization_disclaimer_label.setText("")
+        self.open_in_musescore_button.setEnabled(False)
 
     def _on_review_text_changed(self) -> None:
         """사용자가 텍스트를 수정하면 해당 페이지의 `PageResult.text`에 실시간으로 반영한다."""
@@ -574,6 +624,51 @@ class MainWindow(QMainWindow):
         self._refresh_diagram_panel(input_path)
 
     # ------------------------------------------------------------------
+    # SCR-3: 악보 오류 검수 (MuseScore 외부 편집기)
+    # ------------------------------------------------------------------
+
+    def _on_open_in_musescore_clicked(self) -> None:
+        """선택된 악보 페이지를 MuseScore GUI 편집기로 연다(SCR-3).
+
+        `open_score_in_external_editor`는 `subprocess.Popen`으로 즉시 반환하는
+        비블로킹 호출이라 `VectorizeWorker` 같은 QThread가 필요 없다. 다만 반환된
+        `Popen`을 계속 참조로 들고 있지 않으면 프로세스가 아직 실행 중일 때 GC되어
+        `ResourceWarning`이 날 수 있으므로 `self._open_musescore_processes`에 보관한다.
+        """
+        items = self.file_list_widget.selectedItems()
+        if not items:
+            return
+        path = Path(items[0].data(_PATH_ROLE))
+        result = self._results_by_input.get(str(path.resolve()))
+        if (
+            result is None
+            or result.document_type != DocumentType.SCORE
+            or result.musicxml_path is None
+        ):
+            return
+
+        try:
+            process = open_score_in_external_editor(result.musicxml_path)
+        except ScoreRendererUnavailableError as exc:
+            QMessageBox.critical(self, "MuseScore 없음", str(exc))
+            return
+        except FileNotFoundError as exc:
+            QMessageBox.critical(self, "MusicXML 없음", str(exc))
+            return
+        except OSError as exc:
+            # mscore 바이너리가 존재하지만 실행 권한이 없거나 손상된 경우 등,
+            # Popen이 던질 수 있는 그 외의 OSError도 조용히 삼키지 않고 알린다.
+            QMessageBox.critical(self, "MuseScore 실행 오류", str(exc))
+            return
+
+        # 이미 종료된 프로세스는 리스트에서 걷어내 세션 내내 계속 커지지 않게 한다.
+        self._open_musescore_processes = [
+            p for p in self._open_musescore_processes if p.poll() is None
+        ]
+        self._open_musescore_processes.append(process)
+        self.status_label.setText(f"MuseScore에서 열었습니다: {result.musicxml_path.name}")
+
+    # ------------------------------------------------------------------
     # GUI-4: 내보내기
     # ------------------------------------------------------------------
 
@@ -622,4 +717,9 @@ class MainWindow(QMainWindow):
         if self._work_dir is not None:
             # PACS 스캔 등 민감한 문서 사본이 시스템 임시 디렉터리에 남지 않도록 종료 시 정리한다.
             shutil.rmtree(self._work_dir, ignore_errors=True)
+        # SCR-3: 열려 있는 MuseScore 프로세스는 강제 종료하지 않는다 — 사용자가 편집
+        # 중인 내용을 잃을 수 있다. 이 앱이 종료된 뒤에도 OS가 알아서 계속 살려두는
+        # 것이 의도된 동작이므로, 참조 리스트만 정리한다(Popen 객체를 GC해도 이미 시작된
+        # 자식 프로세스 자체는 종료되지 않는다).
+        self._open_musescore_processes.clear()
         event.accept()
