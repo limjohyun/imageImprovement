@@ -30,6 +30,15 @@ https://pytest-qt.readthedocs.io/en/latest/signals.html)가 기대하는 스레�
 나는 등) 어떤 이유로든 처리에 실패하더라도, 그 한 장 때문에 이미 성공한 나머지 페이지
 결과까지 버리지 않는다 — 페이지 단위 실패는 `failed_pages`에 모으고 계속 진행하며,
 성공한 페이지가 하나라도 있으면 그것만으로 병합 PDF를 만든다.
+
+Phase4-1(GUI-3 일부, 자르기/회전): `_process_one`이 하던 "전처리 → 자동 분류 →
+라우팅 → PageResult 변환" 로직을 모듈 함수 `process_page_image()`로 뽑아
+`ProcessingWorker`와 `ReprocessWorker`가 함께 재사용한다. 자르기/회전은 이미
+PRE-1~5 전처리를 거친 결과물이 아니라 원본 raw 사진에 적용해야 정확하므로(그렇지
+않으면 이미 원근 보정된 이미지를 다시 자르는 문제가 생긴다), 호출부(`MainWindow`)가
+raw 이미지를 읽어 `app.preprocess.manual_correction.apply_manual_correction`으로
+자르기/회전까지 마친 배열을 만든 뒤 `ReprocessWorker`에 넘기면, 그 지점부터
+`process_page_image()`로 파이프라인 전체를 다시 태운다.
 """
 
 from __future__ import annotations
@@ -85,6 +94,75 @@ class PageResult:
     musicxml_path: Path | None = None
     """SCR-3: 악보로 분류된 페이지에서만 채워지는 OMR 인식 MusicXML 경로.
     "MuseScore에서 열기" 버튼이 이 값으로 외부 편집기를 연다."""
+
+    crop_rect: tuple[int, int, int, int] | None = None
+    """Phase4-1(GUI-3): 사용자가 지정한 자르기 영역 `(x, y, width, height)`
+    (회전 후 이미지 기준). `CropRotateDialog`를 다시 열 때 이전 값을 기본값으로
+    보여주기 위해 보관한다. 자르기를 적용하지 않았으면 None."""
+
+    rotation_degrees: int = 0
+    """Phase4-1(GUI-3): 사용자가 지정한 회전 각도(90도 단위, 0/90/180/270)."""
+
+
+def process_page_image(
+    image: np.ndarray,
+    input_path: Path,
+    page_pdf_path: Path,
+    *,
+    lang_kwargs: dict[str, str] | None = None,
+    preprocess_config: PreprocessConfig | None = None,
+) -> PageResult:
+    """이미지 한 장을 (공통 전처리 → 자동 분류 → 위임 → `PageResult` 변환)까지 처리한다.
+
+    `ProcessingWorker`(최초 배치 처리)와 `ReprocessWorker`(Phase4-1: 자르기/회전
+    보정 후 재처리)가 이 함수를 공유한다 — 이미 메모리에 올라온 이미지 배열을
+    받는 것이 계약이므로, 파일을 새로 읽어오는 책임은 호출자에게 있다(배치
+    최초 처리는 원본 파일에서, 재처리는 사용자가 보정한 배열에서 시작하기 때문에
+    "이미지를 어디서 가져오는지"가 다르다).
+
+    `route_and_process`는 이미 전처리된 이미지를 받는 API이므로, 여기서 전처리를
+    먼저 한 번만 수행하고 그 결과를 넘긴다(이중 전처리 방지). 분류는 여기서 먼저
+    한 번 수행해(`classify_document_type`) 그 결과에 따라 텍스트 처리기 전용
+    옵션(`lang`)이 도형/악보 처리기에 잘못 전달되지 않게 한다.
+    """
+    lang_kwargs = lang_kwargs or {}
+    preprocessed = run_pipeline(image, preprocess_config)
+
+    document_type = classify_document_type(preprocessed)
+    extra_kwargs = lang_kwargs if document_type == DocumentType.TEXT else {}
+    result = route_and_process(preprocessed, page_pdf_path, override=document_type, **extra_kwargs)
+
+    if isinstance(result, TextOcrResult):
+        return PageResult(
+            input_path=input_path,
+            page_pdf_path=result.pdf_path,
+            text=result.text,
+            document_type=document_type,
+        )
+    if isinstance(result, DiagramResult):
+        return PageResult(
+            input_path=input_path,
+            page_pdf_path=result.pdf_path,
+            text=None,
+            document_type=document_type,
+            sharpened_image=result.sharpened_image,
+            svg_path=result.svg_path,
+            vectorization_disclaimer=result.vectorization_disclaimer,
+        )
+    if isinstance(result, ScoreResult):
+        return PageResult(
+            input_path=input_path,
+            page_pdf_path=result.pdf_path,
+            text=None,
+            document_type=document_type,
+            musicxml_path=result.musicxml_path,
+        )
+    # route_and_process가 미구현 유형에 대해서는 이미 UnsupportedDocumentTypeError를
+    # 던지므로 정상 흐름에서는 도달하지 않는다. 향후 새 처리기가 등록됐는데 여기
+    # 변환 로직을 깜빡 잊는 실수를 조용히 넘기지 않기 위한 안전망이다.
+    raise UnsupportedDocumentTypeError(
+        f"'{document_type.value}' 처리 결과를 PageResult로 변환할 방법이 없습니다."
+    )
 
 
 class ProcessingWorker(QThread):
@@ -176,54 +254,16 @@ class ProcessingWorker(QThread):
         return f"{total}장 중 {len(self.failed_pages)}장 처리 실패: {detail}"
 
     def _process_one(self, image_path: Path, page_pdf_path: Path) -> PageResult:
-        """이미지 한 장을 (읽기 → 공통 전처리 → 자동 분류 + 위임)까지 처리한다.
-
-        `route_and_process`는 이미 전처리된 이미지를 받는 API이므로, 여기서 전처리를
-        먼저 한 번만 수행하고 그 결과를 넘긴다(이중 전처리 방지). 분류는 여기서
-        먼저 한 번 수행해(`classify_document_type`) 그 결과에 따라 텍스트 처리기
-        전용 옵션(`lang`)이 도형 처리기에 잘못 전달되지 않게 한다.
-        """
+        """이미지 한 장을 파일에서 읽어 `process_page_image()`로 처리한다."""
         image = cv2.imread(str(image_path))
         if image is None:
             raise FileNotFoundError(f"이미지를 읽을 수 없습니다: {image_path}")
-        preprocessed = run_pipeline(image, self._preprocess_config)
-
-        document_type = classify_document_type(preprocessed)
-        extra_kwargs = self._lang_kwargs if document_type == DocumentType.TEXT else {}
-        result = route_and_process(
-            preprocessed, page_pdf_path, override=document_type, **extra_kwargs
-        )
-
-        if isinstance(result, TextOcrResult):
-            return PageResult(
-                input_path=image_path,
-                page_pdf_path=result.pdf_path,
-                text=result.text,
-                document_type=document_type,
-            )
-        if isinstance(result, DiagramResult):
-            return PageResult(
-                input_path=image_path,
-                page_pdf_path=result.pdf_path,
-                text=None,
-                document_type=document_type,
-                sharpened_image=result.sharpened_image,
-                svg_path=result.svg_path,
-                vectorization_disclaimer=result.vectorization_disclaimer,
-            )
-        if isinstance(result, ScoreResult):
-            return PageResult(
-                input_path=image_path,
-                page_pdf_path=result.pdf_path,
-                text=None,
-                document_type=document_type,
-                musicxml_path=result.musicxml_path,
-            )
-        # route_and_process가 미구현 유형에 대해서는 이미 UnsupportedDocumentTypeError를
-        # 던지므로 정상 흐름에서는 도달하지 않는다. 향후 새 처리기가 등록됐는데 여기
-        # 변환 로직을 깜빡 잊는 실수를 조용히 넘기지 않기 위한 안전망이다.
-        raise UnsupportedDocumentTypeError(
-            f"'{document_type.value}' 처리 결과를 PageResult로 변환할 방법이 없습니다."
+        return process_page_image(
+            image,
+            image_path,
+            page_pdf_path,
+            lang_kwargs=self._lang_kwargs,
+            preprocess_config=self._preprocess_config,
         )
 
 
@@ -248,4 +288,49 @@ class VectorizeWorker(QThread):
             self.svg_path = _vectorize_diagram(self.sharpened_image, self.output_svg)
         except Exception as exc:  # noqa: BLE001 - 외부 라이브러리(vtracer) 호출 경계
             logger.exception("도형 벡터화 중 오류가 발생했습니다.")
+            self.error_occurred.emit(str(exc))
+
+
+class ReprocessWorker(QThread):
+    """Phase4-1(GUI-3 일부): 자르기/회전으로 보정한 이미지를 받아 파이프라인을 다시 실행한다.
+
+    `image`는 이미 사용자가 지정한 회전/자르기가 적용된 배열이어야 한다(원본 raw
+    사진에 `app.preprocess.manual_correction.apply_manual_correction`을 적용한
+    결과) — 이 워커는 그 지점부터 `process_page_image()`(전처리→분류→라우팅)를
+    다시 태우기만 한다. 업스케일(Real-ESRGAN)을 포함한 무거운 연산이므로
+    `VectorizeWorker`와 같은 이유로 별도 QThread에서 실행한다.
+    """
+
+    error_occurred = Signal(str)
+    """재처리 중 예외가 발생했을 때 사용자에게 보여줄 메시지."""
+
+    def __init__(
+        self,
+        image: np.ndarray,
+        input_path: Path,
+        page_pdf_path: Path,
+        *,
+        lang: str | None = None,
+        preprocess_config: PreprocessConfig | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.image = image
+        self.input_path = Path(input_path)
+        self.page_pdf_path = Path(page_pdf_path)
+        self._lang_kwargs = {"lang": lang} if lang else {}
+        self._preprocess_config = preprocess_config
+        self.page_result: PageResult | None = None
+
+    def run(self) -> None:
+        try:
+            self.page_result = process_page_image(
+                self.image,
+                self.input_path,
+                self.page_pdf_path,
+                lang_kwargs=self._lang_kwargs,
+                preprocess_config=self._preprocess_config,
+            )
+        except Exception as exc:  # noqa: BLE001 - 파이프라인 전체(전처리~라우팅) 재실행 경계
+            logger.exception("페이지 재처리 중 오류가 발생했습니다: %s", self.input_path)
             self.error_occurred.emit(str(exc))

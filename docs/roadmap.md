@@ -45,7 +45,7 @@
 
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
-| 1 | 수동 보정 (자르기/회전) | GUI-3(일부) | Phase2#5, Phase3#5 | `851d5923` | ⬜ 대기 |
+| 1 | 수동 보정 (자르기/회전) | GUI-3(일부) | Phase2#5, Phase3#5 | `851d5923` | ✅ 완료 |
 | 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ⬜ 대기 |
 | 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ⬜ 대기 |
 | 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ⬜ 대기 |
@@ -217,6 +217,13 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - Phase2-5와 마찬가지로 테스트 전용 변경(프로덕션 코드 수정 없음)이라 별도 `code-reviewer` 단계 없이 진행. 발견된 프로덕션 결함 없음.
 - 최종 검증: `pytest -q` → 117 passed, 3 skipped(oemer 체크포인트 미설치 2건 + Real-ESRGAN 가중치 미지정 1건, 모두 기존/의도된 결과). `ruff check .` → 통과.
 - **Phase3(악보 처리, OMR) 전체 완료.**
+
+### ✅ Phase4-1: 수동 보정 (자르기/회전) — 완료
+
+- `python-dev-expert`가 구현: `app/preprocess/manual_correction.py`(신규) — `rotate_image`(90도 단위), `crop_image`(x/y/width/height 범위 검증), `apply_manual_correction`(회전 먼저 → 자르기 순서, Qt 비의존 순수 함수). `app/gui/crop_rotate_dialog.py`(신규) — `CropRotateDialog`: 마우스 드래그 대신 숫자 입력(회전 콤보박스 + x/y/width/height 스핀박스) 방식으로 사용자와 합의(구현 단순성·pytest-qt 자동화 용이성). `app/gui/worker.py`의 `ProcessingWorker._process_one` 로직을 모듈 함수 `process_page_image()`로 추출해 신설된 `ReprocessWorker(QThread)`와 공유(중복 제거). `app/gui/main_window.py`에 문서 유형 무관 공통 "자르기/회전 보정" 그룹박스 추가, 재처리는 항상 raw 원본에서 다시 시작(누적 크롭/undo 스택 없음 — 의도된 범위 축소), 완료 시 Phase2-4의 `_is_currently_selected` 가드 패턴으로 화면 갱신, `_rebuild_merged_pdf()`로 최종 PDF 재병합.
+- `code-reviewer`가 검토해 HIGH 2건 발견 및 코드 추적으로 실제 재현 가능함을 확인: (1) 배치 처리(`ProcessingWorker`) 도중 이미 끝난 페이지를 재처리하면 `_rebuild_merged_pdf()`와 배치의 최종 `assemble_pdf`가 같은 `merged.pdf` 경로에 동시에 쓸 수 있는 경합 — `_refresh_crop_rotate_panel`이 페이지 결과 유무만 보고 배치가 아직 실행 중인지 확인하지 않아 발생. (2) `_start_processing()`이 `self._vectorize_worker`/`self._reprocess_worker` 실행 여부를 확인하지 않아, 재처리/벡터화가 진행 중일 때 "처리 시작"을 다시 누르면 `shutil.rmtree`가 그 워커가 곧 쓰려는 작업 디렉터리를 삭제해버림(`closeEvent`는 이미 여러 워커를 확인하는데 여기만 빠짐). MEDIUM 1건 — 재처리 완료 콜백이 `self._reprocess_worker`를 콜백 내부에서 다시 참조해, 좁은 시간창에 새 재처리가 시작되면 먼저 시작된 워커의 뒤늦은 콜백이 새 워커의 상태를 잘못 정리할 수 있는 TOCTOU 경합.
+- `python-dev-expert`가 수정: `_running_background_workers()` 헬퍼로 세 워커(`_worker`/`_vectorize_worker`/`_reprocess_worker`)의 실행 여부를 한 곳에서 계산해 `_start_processing()`과 `closeEvent()`(수정 중 `closeEvent`가 실제로는 `_reprocess_worker`를 빼먹고 있던 것도 추가로 발견해 함께 고침) 양쪽에서 재사용. 자르기/회전 버튼은 배치/재처리 중 하나라도 실행 중이면 비활성화, 배치 완료 시점에 재갱신. 재처리 완료/에러 콜백은 `self._reprocess_worker`를 다시 읽는 대신 콜백을 발생시킨 워커 인스턴스를 클로저로 그 자리에서 고정해 전달하고, `self._reprocess_worker is worker`일 때만 상태를 정리하도록 변경. `VectorizeWorker` 쪽에도 이론상 동일한 TOCTOU 취약점이 있음을 확인했으나 이번 커밋 범위(Phase4-1 신규 코드) 밖이라 별도 과제로 남김. 회귀 테스트 `tests/gui/test_crop_rotate_guards.py`(6건) 신규 추가.
+- 최종 검증: `pytest -q` → 143 passed, 3 skipped(oemer 체크포인트 미설치 2건 + Real-ESRGAN 가중치 미지정 1건, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
