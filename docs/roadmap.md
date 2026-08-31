@@ -46,7 +46,7 @@
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
 | 1 | 수동 보정 (자르기/회전) | GUI-3(일부) | Phase2#5, Phase3#5 | `851d5923` | ✅ 완료 |
-| 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ⬜ 대기 |
+| 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ✅ 완료 |
 | 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ⬜ 대기 |
 | 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ⬜ 대기 |
 | 5 | Phase4 End-to-End 검증 (혼합 워크플로우) | §9 Phase4 | #4 | `1abca8b7` | ⬜ 대기 |
@@ -224,6 +224,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `code-reviewer`가 검토해 HIGH 2건 발견 및 코드 추적으로 실제 재현 가능함을 확인: (1) 배치 처리(`ProcessingWorker`) 도중 이미 끝난 페이지를 재처리하면 `_rebuild_merged_pdf()`와 배치의 최종 `assemble_pdf`가 같은 `merged.pdf` 경로에 동시에 쓸 수 있는 경합 — `_refresh_crop_rotate_panel`이 페이지 결과 유무만 보고 배치가 아직 실행 중인지 확인하지 않아 발생. (2) `_start_processing()`이 `self._vectorize_worker`/`self._reprocess_worker` 실행 여부를 확인하지 않아, 재처리/벡터화가 진행 중일 때 "처리 시작"을 다시 누르면 `shutil.rmtree`가 그 워커가 곧 쓰려는 작업 디렉터리를 삭제해버림(`closeEvent`는 이미 여러 워커를 확인하는데 여기만 빠짐). MEDIUM 1건 — 재처리 완료 콜백이 `self._reprocess_worker`를 콜백 내부에서 다시 참조해, 좁은 시간창에 새 재처리가 시작되면 먼저 시작된 워커의 뒤늦은 콜백이 새 워커의 상태를 잘못 정리할 수 있는 TOCTOU 경합.
 - `python-dev-expert`가 수정: `_running_background_workers()` 헬퍼로 세 워커(`_worker`/`_vectorize_worker`/`_reprocess_worker`)의 실행 여부를 한 곳에서 계산해 `_start_processing()`과 `closeEvent()`(수정 중 `closeEvent`가 실제로는 `_reprocess_worker`를 빼먹고 있던 것도 추가로 발견해 함께 고침) 양쪽에서 재사용. 자르기/회전 버튼은 배치/재처리 중 하나라도 실행 중이면 비활성화, 배치 완료 시점에 재갱신. 재처리 완료/에러 콜백은 `self._reprocess_worker`를 다시 읽는 대신 콜백을 발생시킨 워커 인스턴스를 클로저로 그 자리에서 고정해 전달하고, `self._reprocess_worker is worker`일 때만 상태를 정리하도록 변경. `VectorizeWorker` 쪽에도 이론상 동일한 TOCTOU 취약점이 있음을 확인했으나 이번 커밋 범위(Phase4-1 신규 코드) 밖이라 별도 과제로 남김. 회귀 테스트 `tests/gui/test_crop_rotate_guards.py`(6건) 신규 추가.
 - 최종 검증: `pytest -q` → 143 passed, 3 skipped(oemer 체크포인트 미설치 2건 + Real-ESRGAN 가중치 미지정 1건, 기존과 동일한 의도된 결과). `ruff check .` → 통과.
+
+### ✅ Phase4-2: 도형/악보 검수 위젯 통합 — 완료
+
+- 범위는 사용자와 사전 합의: **UI 통합/정리만**(새 기능 추가 없음). `python-dev-expert`가 `app/gui/main_window.py`만 수정: 문서 유형 무관 공통 영역(자르기/회전)은 오른쪽 컬럼 최상단에 그대로 고정하고, 유형별 전용 패널(텍스트 검수/도형 벡터화/악보 MuseScore)은 `_build_review_stack()`으로 신설한 `QStackedWidget`(`self.review_stack`) 안에 페이지로 등록해 `_show_review_page_for(document_type)`가 현재 페이지 유형에 맞는 것 하나만 보여주도록 변경(기존엔 세 그룹박스가 항상 동시에 화면에 남아있었음). 기존 위젯 객체 이름(`text_review_edit`, `vectorize_button`, `open_in_musescore_button` 등)과 기능은 전혀 바꾸지 않음.
+- `code-reviewer`가 검토: 차단급(HIGH) 문제 없음. `QStackedWidget` 전환 로직을 별도 스크립트로 직접 재현해 문서 유형별 페이지 전환이 정확하고 숨겨진 페이지 위젯이 클릭 불가능한 상태로 유지됨을 확인. MEDIUM 2건 — (1) 스택 전체에 `stretch=1`을 준 탓에 도형/악보처럼 컴팩트한 페이지도 `QStackedWidget`이 강제로 늘려 그룹박스 아래 500px 가까운 빈 공간이 생기는 실제 시각적 회귀(실측으로 재현 확인). (2) `review_stack.currentWidget()`이 올바른지 검증하는 회귀 테스트가 전무해 전환 로직이 완전히 잘못돼도 기존 테스트가 못 잡아내는 커버리지 공백.
+- `python-dev-expert`가 수정: 도형/악보 그룹박스를 스택에 직접 넣지 않고 `_wrap_with_top_stretch()` 헬퍼로 `QVBoxLayout`+`addStretch(1)` 래퍼에 담아 등록해, 그룹박스는 위쪽에 자연스러운 크기로 고정되고 남는 공간은 테두리 밖 배경으로 빠지게 함(텍스트 검수 패널은 원래대로 확장 유지). `tests/gui/test_main_window.py`에 `test_review_stack_shows_page_matching_document_type` 추가— TEXT/DIAGRAM/SCORE 세 유형 선택 시 `review_stack.currentWidget()`이 기대한 페이지와 정확히 일치하는지 검증.
+- 최종 검증: `pytest -q` → 144 passed, 3 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
+- **참고(추적 유지)**: Phase3-4 리뷰에서 "MuseScore 재수정본을 앱에 재반영하는 흐름"이 Phase4-2 검토 대상으로 이월된 바 있으나, 이번 Phase4-2는 UI 통합만으로 범위를 좁히기로 사용자와 합의했으므로 그 항목은 이번에도 구현하지 않음 — 필요 시 별도 task로 재검토.
 
 ## 다음 진행 방식
 

@@ -40,6 +40,18 @@ Phase4-1(GUI-3 일부, 자르기/회전): 문서 유형과 무관하게 이미 �
 (`_rebuild_merged_pdf`). 재처리 도중 사용자가 다른 페이지로 이동해도 화면 갱신이
 엉키지 않도록 Phase2-4의 `_is_currently_selected(path)` 가드 패턴을 그대로 쓰되,
 `PageResult` 데이터 자체와 병합 PDF는 선택 여부와 무관하게 항상 갱신한다.
+
+Phase4-2(GUI-3 전체, 검수 위젯 통합): 자르기/회전은 문서 유형과 무관한 공통 보정이므로
+계속 오른쪽 컬럼 맨 위에 고정해 항상 보이게 두고, 그 아래 문서 유형별 전용 패널
+(텍스트 검수/도형 벡터화/악보 검수)은 서로 동시에 볼 필요가 없으므로 `QStackedWidget`
+(`review_stack`)으로 묶어 현재 선택된 페이지의 `document_type`에 맞는 패널 하나만
+보이게 한다. 위젯 자체(`text_review_edit`/`vectorize_button`/
+`vectorization_disclaimer_label`/`open_in_musescore_button`)와 그 활성화/비활성화
+로직은 그대로 유지하고, `_refresh_type_review_panels()`가 기존 세 `_refresh_*`
+호출을 한데 묶어 호출한 뒤 어떤 패널을 보여줄지만 추가로 결정한다(page 미선택·
+미처리 상태의 기본 패널은 텍스트 검수 패널을 그대로 재사용 — 이미 "선택하세요"/
+"처리되지 않았습니다" 안내를 자체적으로 보여주고 있어 별도의 빈 기본 패널을
+새로 만들 필요가 없다).
 """
 
 from __future__ import annotations
@@ -66,6 +78,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -184,12 +197,43 @@ class MainWindow(QMainWindow):
 
         right_column = QVBoxLayout()
         right_column.addWidget(self._build_crop_rotate_group())
-        right_column.addWidget(self._build_text_review_group(), stretch=1)
-        right_column.addWidget(self._build_diagram_group())
-        right_column.addWidget(self._build_score_group())
+        right_column.addWidget(self._build_review_stack(), stretch=1)
         layout.addLayout(right_column, stretch=1)
 
         return layout
+
+    def _build_review_stack(self) -> QStackedWidget:
+        """Phase4-2(GUI-3 전체): 문서 유형별 전용 검수 패널(텍스트/도형/악보)을
+        `QStackedWidget`으로 묶어, 현재 선택된 페이지의 `document_type`에 맞는
+        패널 하나만 보이게 한다. 자르기/회전은 유형과 무관한 공통 보정이라 이
+        스택 밖(호출부인 `_build_body`)에 항상 고정해 둔다.
+
+        텍스트 검수 패널(`QPlainTextEdit`)은 원래도 세로로 확장되는 게 자연스러워
+        그대로 스택에 넣지만, 도형/악보 패널은 버튼 몇 개뿐인 컴팩트한 그룹박스라
+        `QStackedWidget`이 강제로 늘리면 그룹박스 테두리 안에 눈에 띄는 빈 공간이
+        생긴다(code-reviewer MEDIUM #1). 이를 막기 위해 그룹박스를 작은 래퍼
+        위젯으로 감싸 `addStretch`로 남는 공간을 그룹박스 밖(중립적인 배경)으로
+        빼낸 뒤 그 래퍼를 스택 페이지로 등록한다.
+        """
+        stack = QStackedWidget()
+        self._text_review_page = self._build_text_review_group()
+        self._diagram_review_page = self._wrap_with_top_stretch(self._build_diagram_group())
+        self._score_review_page = self._wrap_with_top_stretch(self._build_score_group())
+        stack.addWidget(self._text_review_page)
+        stack.addWidget(self._diagram_review_page)
+        stack.addWidget(self._score_review_page)
+        self.review_stack = stack
+        return stack
+
+    @staticmethod
+    def _wrap_with_top_stretch(content: QWidget) -> QWidget:
+        """컴팩트한 위젯을 위쪽에 고정하고 남는 세로 공간은 아래로 밀어내는 래퍼."""
+        wrapper = QWidget()
+        wrapper_layout = QVBoxLayout(wrapper)
+        wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        wrapper_layout.addWidget(content)
+        wrapper_layout.addStretch(1)
+        return wrapper
 
     def _build_crop_rotate_group(self) -> QGroupBox:
         """Phase4-1(GUI-3 일부): 문서 유형과 무관하게 모든 처리된 페이지에서 쓸 수 있는
@@ -466,9 +510,7 @@ class MainWindow(QMainWindow):
         path = Path(items[0].data(_PATH_ROLE))
         self._show_original_preview(path)
         self._refresh_processed_preview(path)
-        self._refresh_text_review(path)
-        self._refresh_diagram_panel(path)
-        self._refresh_score_panel(path)
+        self._refresh_type_review_panels(path)
         self._refresh_crop_rotate_panel(path)
 
     def _refresh_preview_if_selected(self, input_path: Path) -> None:
@@ -478,9 +520,7 @@ class MainWindow(QMainWindow):
         selected_path = Path(items[0].data(_PATH_ROLE))
         if selected_path.resolve() == input_path.resolve():
             self._refresh_processed_preview(selected_path)
-            self._refresh_text_review(selected_path)
-            self._refresh_diagram_panel(selected_path)
-            self._refresh_score_panel(selected_path)
+            self._refresh_type_review_panels(selected_path)
             self._refresh_crop_rotate_panel(selected_path)
 
     def _show_original_preview(self, path: Path) -> None:
@@ -576,6 +616,32 @@ class MainWindow(QMainWindow):
         )
         self.open_in_musescore_button.setEnabled(can_open)
 
+    def _refresh_type_review_panels(self, path: Path) -> None:
+        """선택된 페이지의 문서 유형별 검수 패널(텍스트/도형/악보) 내용을 갱신하고,
+        그중 `document_type`에 맞는 패널 하나만 `review_stack`에 보여준다 (Phase4-2,
+        GUI-3 전체). 세 패널을 항상 함께 갱신해야 하는 호출부(선택 변경, 처리 완료,
+        재처리 완료 등)가 공통으로 쓰는 진입점이다.
+        """
+        self._refresh_text_review(path)
+        self._refresh_diagram_panel(path)
+        self._refresh_score_panel(path)
+        result = self._results_by_input.get(str(path.resolve()))
+        self._show_review_page_for(result.document_type if result is not None else None)
+
+    def _show_review_page_for(self, document_type: DocumentType | None) -> None:
+        """`review_stack`에서 문서 유형에 맞는 패널로 전환한다.
+
+        미처리 페이지(`document_type=None`)와 TEXT 페이지는 텍스트 검수 패널을
+        그대로 공유한다 — 그 패널이 이미 "선택하세요"/"아직 처리되지 않았습니다"
+        안내를 자체적으로 보여주므로 별도의 빈 기본 패널을 새로 만들 필요가 없다.
+        """
+        if document_type == DocumentType.DIAGRAM:
+            self.review_stack.setCurrentWidget(self._diagram_review_page)
+        elif document_type == DocumentType.SCORE:
+            self.review_stack.setCurrentWidget(self._score_review_page)
+        else:
+            self.review_stack.setCurrentWidget(self._text_review_page)
+
     def _refresh_crop_rotate_panel(self, path: Path) -> None:
         """Phase4-1(GUI-3 일부): 선택된 페이지가 이미 처리된 경우에만 자르기/회전
         버튼을 활성화한다. 문서 유형과 무관하게 모든 유형에서 동작하는 범용 기능이다.
@@ -604,9 +670,7 @@ class MainWindow(QMainWindow):
         items = self.file_list_widget.selectedItems()
         if items:
             path = Path(items[0].data(_PATH_ROLE))
-            self._refresh_text_review(path)
-            self._refresh_diagram_panel(path)
-            self._refresh_score_panel(path)
+            self._refresh_type_review_panels(path)
             self._refresh_crop_rotate_panel(path)
             return
         self._reviewed_input_path = None
@@ -618,6 +682,7 @@ class MainWindow(QMainWindow):
         self.vectorization_disclaimer_label.setText("")
         self.open_in_musescore_button.setEnabled(False)
         self.crop_rotate_button.setEnabled(False)
+        self._show_review_page_for(None)
 
     def _on_review_text_changed(self) -> None:
         """사용자가 텍스트를 수정하면 해당 페이지의 `PageResult.text`에 실시간으로 반영한다."""
@@ -903,9 +968,7 @@ class MainWindow(QMainWindow):
 
         self._refresh_crop_rotate_panel(input_path)
         self._refresh_processed_preview(input_path)
-        self._refresh_text_review(input_path)
-        self._refresh_diagram_panel(input_path)
-        self._refresh_score_panel(input_path)
+        self._refresh_type_review_panels(input_path)
         self.status_label.setText(f"보정을 반영해 다시 처리했습니다: {input_path.name}")
         if rebuild_error is not None:
             QMessageBox.warning(self, "PDF 재병합 실패", rebuild_error)

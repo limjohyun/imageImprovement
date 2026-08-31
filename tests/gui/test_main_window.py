@@ -103,6 +103,60 @@ def test_text_review_disabled_for_unprocessed_page(qtbot, tmp_path):
     assert window.text_review_edit.placeholderText() == "아직 처리되지 않았습니다."
 
 
+def test_review_stack_shows_page_matching_document_type(qtbot, tmp_path):
+    """Phase4-2(GUI-3 전체): `review_stack`이 문서 유형에 맞는 검수 패널로 정확히
+    전환되는지 확인한다 (code-reviewer MEDIUM #2 지적 — 기존 테스트는 위젯의
+    활성화 상태만 봐서 `_show_review_page_for`가 완전히 잘못된 페이지를 보여줘도
+    잡아내지 못했다).
+    """
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    text_path = tmp_path / "text.png"
+    diagram_path = tmp_path / "diagram.png"
+    score_path = tmp_path / "score.png"
+    for path in (text_path, diagram_path, score_path):
+        path.write_bytes(b"fake-image-bytes")
+    window._add_image_paths([text_path, diagram_path, score_path])
+
+    text_result = PageResult(
+        input_path=text_path,
+        page_pdf_path=tmp_path / "text.pdf",
+        document_type=DocumentType.TEXT,
+        text="",
+    )
+    diagram_result = PageResult(
+        input_path=diagram_path,
+        page_pdf_path=tmp_path / "diagram.pdf",
+        document_type=DocumentType.DIAGRAM,
+        sharpened_image=np.zeros((10, 10, 3), dtype=np.uint8),
+    )
+    score_result = PageResult(
+        input_path=score_path,
+        page_pdf_path=tmp_path / "score.pdf",
+        document_type=DocumentType.SCORE,
+    )
+    window._results_by_input[str(text_path.resolve())] = text_result
+    window._results_by_input[str(diagram_path.resolve())] = diagram_result
+    window._results_by_input[str(score_path.resolve())] = score_result
+
+    # `_add_image_paths`가 파일명 기준으로 다시 정렬하므로(diagram < score < text),
+    # 삽입 순서가 아니라 이름으로 항목을 찾아 매핑한다.
+    sorted_stems = [p.stem for p in window._image_paths_in_list()]
+    items = {
+        stem: window.file_list_widget.item(i) for i, stem in enumerate(sorted_stems)
+    }
+
+    window.file_list_widget.setCurrentItem(items["text"])
+    assert window.review_stack.currentWidget() is window._text_review_page
+
+    window.file_list_widget.setCurrentItem(items["diagram"])
+    assert window.review_stack.currentWidget() is window._diagram_review_page
+
+    window.file_list_widget.setCurrentItem(items["score"])
+    assert window.review_stack.currentWidget() is window._score_review_page
+
+
 def test_text_review_edit_persists_across_selection_change(qtbot, tmp_path):
     """TXT-3: 처리된 페이지 선택 시 OCR 텍스트가 채워지고, 사용자가 수정한 내용은
     `PageResult.text`에 즉시 반영되며 다른 페이지로 옮겼다 돌아와도 유실되지 않는다."""
