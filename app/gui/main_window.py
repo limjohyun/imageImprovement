@@ -52,6 +52,30 @@ Phase4-2(GUI-3 전체, 검수 위젯 통합): 자르기/회전은 문서 유형�
 미처리 상태의 기본 패널은 텍스트 검수 패널을 그대로 재사용 — 이미 "선택하세요"/
 "처리되지 않았습니다" 안내를 자체적으로 보여주고 있어 별도의 빈 기본 패널을
 새로 만들 필요가 없다).
+
+Phase4-3(PDF-2, 페이지 재정렬/삭제): `file_list_widget`에
+`QListWidget.DragDropMode.InternalMove`를 켜서 드래그 앤 드롭으로 순서를 바꿀 수
+있게 하고, 내부 모델의 `rowsMoved` 시그널을 감지해 이미 처리된 페이지가 있으면
+(`self._merged_pdf_path is not None`) `_rebuild_merged_pdf()`(Phase4-1에서 도입,
+자르기/회전 재처리 후 병합 로직 그대로 재사용)를 다시 호출해 최종 PDF가 새 순서를
+반영하게 한다. 삭제는 새 버튼("선택한 페이지 삭제") + `Delete`/`Backspace` 키
+(macOS 키보드는 물리 키 이름이 Backspace뿐이라 둘 다 처리한다) 둘 다로 트리거되는
+`_on_delete_pages_clicked()` 하나로 처리한다 — 목록에서 항목 제거, 결과 캐시
+(`_results_by_input`)에서 키 제거, 남은 처리된 페이지가 있으면 재병합, 없으면
+`_merged_pdf_path`를 `None`으로 되돌리고 저장 버튼을 비활성화한다. 다중 선택
+삭제는 `QListWidget`이 원래 지원하는 범위를 그대로 반영할 뿐 별도 UI를 새로
+만들지 않는다(선택 모드는 기존 기본값 `SingleSelection`을 그대로 둔다 — 기존
+미리보기/검수 로직 다수가 "현재 선택된 페이지 1장"을 전제하므로 멀티 선택으로
+바꾸면 그 쪽 의미가 모호해진다. 여러 장을 지우려면 한 장씩 지우면 된다).
+
+재정렬/삭제 모두 배치 처리/벡터화/재처리 중 어느 하나라도 실행 중이면 막는다
+(Phase4-1의 `_running_background_workers()` 재사용) — 진행 중인 작업이 참조하는
+페이지 경로/인덱스가 목록 변경으로 어긋나는 것을 막기 위해서다. 삭제는 클릭/키
+입력 시점에 그 자리에서 확인하면 되지만, 드래그 앤 드롭은 이미 순서가 바뀐 뒤에야
+시그널이 오므로("취소"가 어색하다) 애초에 워커가 실행 중이면 `file_list_widget`의
+드래그 자체를 비활성화(`NoDragDrop`)해 둔다 — 이 토글은 `_refresh_list_editing_
+controls()`가 워커 시작/종료 지점마다(배치/벡터화/재처리 시작 및 완료·실패 콜백)
+공통으로 호출해 갱신한다.
 """
 
 from __future__ import annotations
@@ -65,8 +89,9 @@ from pathlib import Path
 import cv2
 import pymupdf
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
-from PySide6.QtGui import QCloseEvent, QImage, QPixmap
+from PySide6.QtGui import QCloseEvent, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -186,9 +211,7 @@ class MainWindow(QMainWindow):
     def _build_body(self) -> QHBoxLayout:
         layout = QHBoxLayout()
 
-        self.file_list_widget = QListWidget()
-        self.file_list_widget.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.file_list_widget, stretch=1)
+        layout.addLayout(self._build_file_list_column(), stretch=1)
 
         preview_layout = QHBoxLayout()
         preview_layout.addWidget(self._build_preview_group("원본", "original_preview_label"))
@@ -199,6 +222,32 @@ class MainWindow(QMainWindow):
         right_column.addWidget(self._build_crop_rotate_group())
         right_column.addWidget(self._build_review_stack(), stretch=1)
         layout.addLayout(right_column, stretch=1)
+
+        return layout
+
+    def _build_file_list_column(self) -> QVBoxLayout:
+        """Phase4-3(PDF-2): 입력 파일 목록 + 재정렬(드래그)/삭제 UI."""
+        layout = QVBoxLayout()
+
+        list_widget = QListWidget()
+        list_widget.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        list_widget.itemSelectionChanged.connect(self._on_selection_changed)
+        list_widget.model().rowsMoved.connect(self._on_rows_moved)
+        self.file_list_widget = list_widget
+        layout.addWidget(list_widget, stretch=1)
+
+        # macOS 키보드에는 물리적인 Delete(Forward Delete) 키가 없는 기종이 많아
+        # Backspace(실제로는 Qt.Key_Backspace)도 함께 삭제 단축키로 처리한다.
+        for key_sequence in (QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)):
+            shortcut = QShortcut(key_sequence, list_widget)
+            shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+            shortcut.activated.connect(self._on_delete_pages_clicked)
+
+        delete_button = QPushButton("선택한 페이지 삭제")
+        delete_button.setEnabled(False)
+        delete_button.clicked.connect(self._on_delete_pages_clicked)
+        layout.addWidget(delete_button)
+        self.delete_page_button = delete_button
 
         return layout
 
@@ -424,8 +473,12 @@ class MainWindow(QMainWindow):
         worker.error_occurred.connect(self._on_processing_error)
         worker.finished.connect(self._on_worker_finished)
         self._worker = worker
-        self.status_label.setText(f"0/{len(image_paths)} 처리 중...")
+        # code-reviewer HIGH 지적: QThread.isRunning()은 start() 호출 전까지 항상
+        # False이므로, _refresh_list_editing_controls()는 반드시 worker.start()
+        # 이후에 호출해야 "워커 실행 중"을 정확히 감지해 드래그/삭제를 막는다.
         worker.start()
+        self._refresh_list_editing_controls()
+        self.status_label.setText(f"0/{len(image_paths)} 처리 중...")
 
     def _set_input_controls_enabled(self, enabled: bool) -> None:
         self.select_folder_button.setEnabled(enabled)
@@ -454,6 +507,25 @@ class MainWindow(QMainWindow):
     def _is_reprocessing(self) -> bool:
         """자르기/회전 재처리(`ReprocessWorker`)가 아직 실행 중인지."""
         return self._reprocess_worker is not None and self._reprocess_worker.isRunning()
+
+    def _refresh_list_editing_controls(self) -> None:
+        """Phase4-3(PDF-2): 재정렬(드래그)/삭제 가능 여부를 워커 실행 상태에 맞춰 갱신한다.
+
+        배치 처리/벡터화/재처리 중 어느 하나라도 실행 중이면 목록을 바꾸지 못하게
+        막는다(`_running_background_workers()` 재사용, Phase4-1과 동일한 원칙) —
+        진행 중인 워커가 참조하는 페이지 경로/인덱스가 목록 변경으로 어긋나는 것을
+        막기 위해서다. 드래그는 이미 이동한 뒤에야 시그널이 오므로("취소"가 어색
+        하다) 애초에 `NoDragDrop`으로 비활성화해 시도 자체를 막는다. 삭제 버튼은
+        선택된 항목이 없을 때도 당연히 비활성화한다.
+        """
+        editing_allowed = not self._running_background_workers()
+        self.file_list_widget.setDragDropMode(
+            QAbstractItemView.DragDropMode.InternalMove
+            if editing_allowed
+            else QAbstractItemView.DragDropMode.NoDragDrop
+        )
+        has_selection = bool(self.file_list_widget.selectedItems())
+        self.delete_page_button.setEnabled(editing_allowed and has_selection)
 
     def _on_progress_changed(self, done: int, total: int) -> None:
         self.status_label.setText(f"{done}/{total} 처리 중...")
@@ -493,10 +565,11 @@ class MainWindow(QMainWindow):
         # HIGH #1(code-reviewer 지적): 배치 처리 중에는 `_refresh_crop_rotate_panel`이
         # 자르기/회전 버튼을 계속 비활성 상태로 둔다(`_is_batch_processing()`이 True).
         # 배치가 끝난 지금 시점에 다시 계산해줘야 현재 선택된 페이지의 버튼이
-        # 정상적으로 활성화된다.
+        # 정상적으로 활성화된다. 재정렬/삭제 가능 여부(Phase4-3)도 같은 이유로 갱신한다.
         items = self.file_list_widget.selectedItems()
         if items:
             self._refresh_crop_rotate_panel(Path(items[0].data(_PATH_ROLE)))
+        self._refresh_list_editing_controls()
         self.processing_completed.emit()
 
     # ------------------------------------------------------------------
@@ -504,6 +577,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_selection_changed(self) -> None:
+        self._refresh_list_editing_controls()
         items = self.file_list_widget.selectedItems()
         if not items:
             return
@@ -660,12 +734,14 @@ class MainWindow(QMainWindow):
         self.crop_rotate_button.setEnabled(can_reprocess)
 
     def _reset_text_review_panel(self) -> None:
-        """새 배치 처리를 시작할 때 검수/벡터화/악보 검수/자르기·회전 패널을 초기화한다.
+        """새 배치 처리를 시작하거나(Phase1) 페이지를 삭제했을 때(Phase4-3) 검수/
+        벡터화/악보 검수/자르기·회전 패널을 초기화한다.
 
         현재 선택된 페이지가 있으면 `_refresh_text_review`/`_refresh_diagram_panel`/
         `_refresh_score_panel`/`_refresh_crop_rotate_panel`로 위임해 "아직 처리되지
         않았습니다" 상태를 보여주고(선택은 유지되므로 이쪽이 더 정확한 문구다),
-        선택된 페이지가 없으면 안내 문구만 되돌린다.
+        선택된 페이지가 없으면(페이지 삭제 직후에는 항상 이 경우다) 안내 문구만
+        되돌린다.
         """
         items = self.file_list_widget.selectedItems()
         if items:
@@ -723,7 +799,10 @@ class MainWindow(QMainWindow):
         worker.error_occurred.connect(lambda message, p=path: self._on_vectorize_error(message, p))
         worker.finished.connect(lambda: self._on_vectorize_finished(result, path))
         self._vectorize_worker = worker
+        # code-reviewer HIGH 지적: start() 호출 전에는 isRunning()이 항상 False이므로
+        # 반드시 start() 이후에 갱신해야 한다.
         worker.start()
+        self._refresh_list_editing_controls()
 
     def _is_currently_selected(self, path: Path) -> bool:
         """벡터화를 요청했던 페이지가 지금도 화면에 선택돼 있는지 확인한다.
@@ -744,6 +823,7 @@ class MainWindow(QMainWindow):
         엉뚱한 페이지를 보는 중에 "벡터화 오류"가 뜨는 것을 막고, 대신 상태표시줄에
         어떤 파일의 오류인지 조용히 남긴다(`_on_vectorize_finished`와 동일한 원칙)."""
         self._vectorize_worker = None
+        self._refresh_list_editing_controls()
         if self._is_currently_selected(input_path):
             self.vectorize_button.setEnabled(True)
             QMessageBox.critical(self, "벡터화 오류", message)
@@ -760,6 +840,7 @@ class MainWindow(QMainWindow):
         """
         worker = self._vectorize_worker
         self._vectorize_worker = None
+        self._refresh_list_editing_controls()
         if worker is None or worker.svg_path is None:
             # 실패 시 `_on_vectorize_error`가 이미 메시지를 보여줬으므로 버튼 상태만 정리한다.
             if self._is_currently_selected(input_path):
@@ -900,7 +981,10 @@ class MainWindow(QMainWindow):
             lambda w=worker: self._on_reprocess_finished(w, path, rotation_degrees, crop_rect)
         )
         self._reprocess_worker = worker
+        # code-reviewer HIGH 지적: start() 호출 전에는 isRunning()이 항상 False이므로
+        # 반드시 start() 이후에 갱신해야 한다.
         worker.start()
+        self._refresh_list_editing_controls()
 
     def _on_reprocess_error(self, worker: ReprocessWorker, message: str, input_path: Path) -> None:
         """재처리 실패를 알린다. 요청 당시 페이지가 지금도 선택돼 있을 때만 팝업을
@@ -914,6 +998,7 @@ class MainWindow(QMainWindow):
         """
         if self._reprocess_worker is worker:
             self._reprocess_worker = None
+        self._refresh_list_editing_controls()
         if self._is_currently_selected(input_path):
             self._refresh_crop_rotate_panel(input_path)
             QMessageBox.critical(self, "재처리 오류", message)
@@ -944,6 +1029,7 @@ class MainWindow(QMainWindow):
         """
         if self._reprocess_worker is worker:
             self._reprocess_worker = None
+        self._refresh_list_editing_controls()
         if worker.page_result is None:
             # 실패 시 `_on_reprocess_error`가 이미 메시지를 보여줬으므로 버튼 상태만 정리한다.
             if self._is_currently_selected(input_path):
@@ -974,11 +1060,15 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "PDF 재병합 실패", rebuild_error)
 
     def _rebuild_merged_pdf(self) -> None:
-        """자르기/회전 재처리로 한 페이지의 `page_pdf_path`가 바뀐 뒤, 파일 목록의
-        원래 순서를 유지한 채 최종 병합 PDF를 다시 만든다 (PDF-1 재사용).
+        """자르기/회전 재처리(Phase4-1)나 페이지 재정렬/삭제(Phase4-3)로 파일 목록의
+        순서/구성이 바뀐 뒤, 그 순서를 그대로 유지한 채 최종 병합 PDF를 다시 만든다
+        (PDF-1의 "입력 순서대로 병합"을 재사용).
 
         아직 처리되지 않았거나 실패한 페이지는 최초 배치 처리(`ProcessingWorker`)와
-        동일하게 건너뛴다 — 부분 성공 상태에서도 병합이 가능해야 한다.
+        동일하게 건너뛴다 — 부분 성공 상태에서도 병합이 가능해야 한다. 처리된
+        페이지가 하나도 남지 않은 경우(Phase4-3: 처리된 페이지를 모두 삭제한 경우)는
+        병합할 대상이 없으므로 이전 병합 결과를 그대로 두지 않고 명시적으로
+        `None`/저장 버튼 비활성화로 되돌린다.
         """
         if self._work_dir is None:
             return
@@ -988,11 +1078,88 @@ class MainWindow(QMainWindow):
             if str(p.resolve()) in self._results_by_input
         ]
         if not ordered_results:
+            self._merged_pdf_path = None
+            self.save_button.setEnabled(False)
             return
         merged_pdf_path = self._work_dir / "merged.pdf"
         assemble_pdf([r.page_pdf_path for r in ordered_results], merged_pdf_path)
         self._merged_pdf_path = merged_pdf_path
         self.save_button.setEnabled(True)
+
+    # ------------------------------------------------------------------
+    # Phase4-3(PDF-2): 페이지 재정렬 / 삭제
+    # ------------------------------------------------------------------
+
+    def _on_rows_moved(self, *args: object) -> None:
+        """드래그 앤 드롭으로 페이지 순서가 바뀌면 최종 병합 PDF도 새 순서로 다시 만든다.
+
+        드래그 자체는 `_refresh_list_editing_controls()`가 워커 실행 중일 때 미리
+        `NoDragDrop`으로 막아두므로 이 핸들러가 불릴 때는 항상 워커가 없는 상태일
+        것이지만, 방어적으로 한 번 더 확인한다. 아직 아무 페이지도 처리되지 않았다면
+        (`_merged_pdf_path is None`) 재병합할 대상이 없으므로 조용히 넘어간다.
+        """
+        if self._running_background_workers() or self._merged_pdf_path is None:
+            return
+        try:
+            self._rebuild_merged_pdf()
+        except Exception as exc:  # noqa: BLE001 - 파일 IO/외부 라이브러리(pymupdf) 경계
+            logger.exception("페이지 재정렬 후 PDF 재병합에 실패했습니다.")
+            QMessageBox.warning(self, "PDF 재병합 실패", str(exc))
+            return
+        self.status_label.setText("페이지 순서를 변경해 PDF를 다시 만들었습니다.")
+
+    def _on_delete_pages_clicked(self) -> None:
+        """선택된 페이지를 목록/결과 캐시에서 지우고 필요하면 최종 병합 PDF를 다시 만든다.
+
+        `Delete`/`Backspace` 단축키와 "선택한 페이지 삭제" 버튼이 공유하는 진입점이다.
+        삭제로 선택이 사라지므로(남은 항목이 자동으로 선택되지 않는다) 미리보기/검수
+        패널은 항상 "선택 없음" 상태로 리셋한다 — 목록이 완전히 비면 GUI-1 이전 상태로
+        자연스럽게 돌아간다.
+        """
+        if self._running_background_workers():
+            QMessageBox.warning(
+                self,
+                "처리 중",
+                "다른 작업(배치 처리/벡터화/재처리)이 진행 중입니다. 완료 후 다시 시도하세요.",
+            )
+            return
+        items = self.file_list_widget.selectedItems()
+        if not items:
+            return
+
+        deleted_paths = [Path(item.data(_PATH_ROLE)) for item in items]
+        for item in items:
+            self.file_list_widget.takeItem(self.file_list_widget.row(item))
+        for path in deleted_paths:
+            self._results_by_input.pop(str(path.resolve()), None)
+
+        self._reset_preview_labels()
+        self._reset_text_review_panel()
+        self._refresh_list_editing_controls()
+
+        if self.file_list_widget.count() == 0:
+            self._merged_pdf_path = None
+            self.save_button.setEnabled(False)
+            self.status_label.setText("이미지를 추가하세요.")
+            return
+
+        try:
+            self._rebuild_merged_pdf()
+        except Exception as exc:  # noqa: BLE001 - 파일 IO/외부 라이브러리(pymupdf) 경계
+            logger.exception("페이지 삭제 후 PDF 재병합에 실패했습니다.")
+            QMessageBox.warning(self, "PDF 재병합 실패", str(exc))
+            return
+        remaining = self.file_list_widget.count()
+        self.status_label.setText(
+            f"{len(deleted_paths)}개 페이지를 삭제했습니다. (남은 {remaining}개)"
+        )
+
+    def _reset_preview_labels(self) -> None:
+        """원본/처리 결과 미리보기 라벨을 초기(선택 없음) 상태로 되돌린다."""
+        self.original_preview_label.setText("미리볼 이미지가 없습니다.")
+        self.original_preview_label.setPixmap(QPixmap())
+        self.processed_preview_label.setText("아직 처리되지 않았습니다.")
+        self.processed_preview_label.setPixmap(QPixmap())
 
     # ------------------------------------------------------------------
     # GUI-4: 내보내기

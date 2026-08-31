@@ -47,7 +47,7 @@
 |---|---|---|---|---|---|
 | 1 | 수동 보정 (자르기/회전) | GUI-3(일부) | Phase2#5, Phase3#5 | `851d5923` | ✅ 완료 |
 | 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ✅ 완료 |
-| 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ⬜ 대기 |
+| 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ✅ 완료 |
 | 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ⬜ 대기 |
 | 5 | Phase4 End-to-End 검증 (혼합 워크플로우) | §9 Phase4 | #4 | `1abca8b7` | ⬜ 대기 |
 
@@ -232,6 +232,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 수정: 도형/악보 그룹박스를 스택에 직접 넣지 않고 `_wrap_with_top_stretch()` 헬퍼로 `QVBoxLayout`+`addStretch(1)` 래퍼에 담아 등록해, 그룹박스는 위쪽에 자연스러운 크기로 고정되고 남는 공간은 테두리 밖 배경으로 빠지게 함(텍스트 검수 패널은 원래대로 확장 유지). `tests/gui/test_main_window.py`에 `test_review_stack_shows_page_matching_document_type` 추가— TEXT/DIAGRAM/SCORE 세 유형 선택 시 `review_stack.currentWidget()`이 기대한 페이지와 정확히 일치하는지 검증.
 - 최종 검증: `pytest -q` → 144 passed, 3 skipped(기존과 동일한 의도된 결과). `ruff check .` → 통과.
 - **참고(추적 유지)**: Phase3-4 리뷰에서 "MuseScore 재수정본을 앱에 재반영하는 흐름"이 Phase4-2 검토 대상으로 이월된 바 있으나, 이번 Phase4-2는 UI 통합만으로 범위를 좁히기로 사용자와 합의했으므로 그 항목은 이번에도 구현하지 않음 — 필요 시 별도 task로 재검토.
+
+### ✅ Phase4-3: 페이지 재정렬/삭제 — 완료
+
+- `python-dev-expert`가 구현: `file_list_widget`에 `QAbstractItemView.DragDropMode.InternalMove`로 드래그 재정렬 지원, 내부 모델의 `rowsMoved`를 `_on_rows_moved()`에 연결해 처리된 페이지가 있으면 Phase4-1의 `_rebuild_merged_pdf()`를 그대로 재사용해 새 순서로 재병합. "선택한 페이지 삭제" 버튼 + `Delete`/`Backspace` 키로 `_on_delete_pages_clicked()` 트리거, 목록/`_results_by_input`에서 제거 후 재병합(마지막 페이지 삭제 시 GUI-1 이전 초기 상태로 복귀). `_running_background_workers()`(Phase4-1)를 재사용해 배치/벡터화/재처리 중에는 드래그·삭제를 막는 `_refresh_list_editing_controls()` 도입.
+- `code-reviewer`가 검토해 HIGH 1건 발견 및 재현 스크립트로 실제 검증: `_refresh_list_editing_controls()` 호출이 `self._worker = worker` 직후·`worker.start()` **이전**에 위치해, `QThread.isRunning()`이 `.start()` 호출 전엔 항상 `False`라는 사실 때문에 배치/벡터화/재처리 시작 시점의 드래그·삭제 가드가 실질적으로 무력화되는 문제(세 곳 `_start_processing`/`_on_vectorize_clicked`/`_on_crop_rotate_clicked` 전부 동일 패턴) — 처리 도중 드래그로 순서를 바꾸면 화면 목록 순서와 실제 저장될 병합 PDF 순서가 조용히 어긋난 채 남을 수 있음(완료 콜백이 재병합을 하지 않으므로). 기존 회귀 테스트 3건은 `_worker`에 이미 시작된 것으로 가정한 가짜 스레드를 직접 대입하는 방식이라 이 타이밍 버그를 전혀 잡아내지 못함을 지적.
+- `python-dev-expert`가 수정: 세 호출부 모두 `_refresh_list_editing_controls()` 호출을 `worker.start()` **이후**로 이동. `_start_processing()`을 실제로 호출해 `.start()` 직후 시점의 드래그·삭제 가드 상태를 검증하는 통합 회귀 테스트(`test_start_processing_disables_editing_immediately_after_start`) 신규 추가(수정 전 순서로는 실패함을 확인).
+- 진행 중 발견된 별개 환경 이슈(코드 결함 아님, 이번 범위 밖): `synthetic_score_photo` fixture가 부르는 `mscore` 서브프로세스 호출이 시스템 부하가 높을 때(동시에 여러 pytest 프로세스가 돌 때) `timeout` 이후 자식은 죽지만 손자(MuseScore GUI 앱 본체)가 파이프 fd를 물고 있어 `subprocess.run`의 `communicate()`가 무한 대기하는 것으로 추정되는 hang을 관찰함 — `tests/fixtures/synthetic.py` 관련, 이번 커밋 범위 밖이라 손대지 않고 기록만 남김.
+- 최종 검증: 신규/관련 회귀 테스트 `tests/gui/test_page_reorder_delete.py` 13개 전부 통과. `tests/gui/` 전체(위 환경 이슈로 느린 악보 E2E 3개 제외) 52 passed. `ruff check .` → 통과.
 
 ## 다음 진행 방식
 
