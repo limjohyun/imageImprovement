@@ -21,13 +21,34 @@ def estimate_skew_angle(image: np.ndarray, *, angle_limit: float = 15.0) -> floa
     반환값을 그대로 `cv2.getRotationMatrix2D`의 angle 인자로 넘기면 수평이 맞춰진다.
     직선을 충분히 찾지 못하면 0.0(보정 없음)을 반환한다 — 문서 윤곽선이 거의 없는
     이미지(예: 사진 위주 슬라이드)에서 억지로 회전시켜 오히려 왜곡을 더하지 않기 위함이다.
+
+    1차 시도(threshold=100)에서 직선을 하나도 찾지 못하면(`lines is None`), 배경 없이
+    프레임을 꽉 채운 촬영 구도 등으로 직선 신호가 약한 실제 사진에서 각도 추정이
+    통째로 실패하는 문제가 있어 완화된 파라미터로 2차 시도를 한 번 더 한다. 2차 시도도
+    실패하면(여전히 `lines is None`) 위와 같은 이유로 0.0을 반환한다.
     """
     gray = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-    min_line_length = max(20, gray.shape[1] // 4)
-    lines = cv2.HoughLinesP(
-        edges, 1, np.pi / 180, threshold=100, minLineLength=min_line_length, maxLineGap=20
-    )
+
+    # (threshold, 최소 길이 분모, 선분 간 최대 허용 간격) 쌍을 순서대로 시도한다.
+    # 1차는 기존 파라미터 그대로이고, 2차는 threshold와 최소 길이 요구치를 각각
+    # 절반으로 완화한 값이다 — 실제 문제 사진(IMG_2442/2443)과 합성 테스트를 함께
+    # 스윕해 실측으로 정했다(자세한 근거는 작업 보고 참고).
+    attempts = ((100, 4, 20), (50, 8, 20))
+    lines = None
+    for threshold, min_line_length_div, max_line_gap in attempts:
+        min_line_length = max(20, gray.shape[1] // min_line_length_div)
+        lines = cv2.HoughLinesP(
+            edges,
+            1,
+            np.pi / 180,
+            threshold=threshold,
+            minLineLength=min_line_length,
+            maxLineGap=max_line_gap,
+        )
+        if lines is not None:
+            break
+
     if lines is None:
         return 0.0
 
