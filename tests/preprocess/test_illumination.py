@@ -46,3 +46,27 @@ def test_correct_illumination_handles_grayscale_input():
     corrected = correct_illumination(gray)
     assert corrected.shape == gray.shape
     assert corrected.dtype == np.uint8
+
+
+def test_correct_illumination_is_robust_to_local_highlight_outlier():
+    """국소 이상치(작은 하이라이트) 때문에 배경 전체가 어두워지던 회귀를 방지한다.
+
+    실제 사진에서 어두운 전경(텍스트/음표) 내부에 작은 반사광 같은 극단적으로 밝은
+    이상치 픽셀이 섞이면, 적응형 min-max 정규화는 그 이상치를 기준으로 전체 범위를
+    늘려버려 정상 배경(균일한 밝기)까지 크게 어두워지는 문제가 있었다. 고정 스케일
+    (`ratio * 255`, 클리핑) 방식은 이런 이상치에 영향받지 않고 배경을 밝게 유지해야 한다.
+    """
+    height, width = 400, 400
+    image = np.full((height, width, 3), 160, dtype=np.uint8)
+    image[180:220, 80:320] = 20  # 어두운 전경(텍스트) 영역
+    image[195:199, 195:199] = 255  # 전경 내부의 초소형 밝은 이상치(반사광 등)
+
+    corrected = correct_illumination(image)
+    corrected_gray = cv2.cvtColor(corrected, cv2.COLOR_BGR2GRAY)
+
+    background_mask = np.ones((height, width), dtype=bool)
+    background_mask[180:220, 80:320] = False
+    background_mean = float(corrected_gray[background_mask].mean())
+
+    # 원본 배경(160)보다 어두워지기는커녕 흰색에 가깝게 유지되어야 한다.
+    assert background_mean > 200.0
