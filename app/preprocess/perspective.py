@@ -75,13 +75,23 @@ def _order_corners(points: np.ndarray) -> np.ndarray:
 
 
 def detect_document_corners(
-    image: np.ndarray, *, min_area_ratio: float = 0.1
+    image: np.ndarray,
+    *,
+    min_area_ratio: float = 0.1,
+    min_dimension_ratio: float = 0.3,
 ) -> np.ndarray | None:
     """이미지 안에서 문서로 추정되는 4각형 윤곽의 모서리 좌표(shape (4, 2))를 찾는다.
 
     사각형 윤곽을 못 찾거나 너무 작으면(배경 대비가 약해 잡음 윤곽만 잡히는 경우)
     None을 반환한다 — 예외를 던지지 않는 이유는 이 함수는 "시도"만 담당하고,
     실패 처리(수동 지정 요구 등)는 상위 `correct_perspective`가 맡기 때문이다.
+
+    `min_dimension_ratio`: 면적 비율(`min_area_ratio`)만으로는 "가로는 이미지
+    폭 전체에 가깝지만 세로는 극히 일부만 차지하는" 극단적으로 찌그러진 4각형도
+    걸러내지 못한다(실사진 재현 사례: 악보 안의 오선+TAB 한 줄이 면적 조건만 넘겨
+    문서 외곽으로 오인된 버그). 실제 문서 페이지는 보통 가로/세로 모두 이미지의
+    상당 부분을 차지하므로, 후보의 축 정렬 바운딩 박스(`cv2.boundingRect`) 폭/높이가
+    각각 이미지 전체 폭/높이의 이 비율 이상이어야 통과시킨다.
     """
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
@@ -91,7 +101,8 @@ def detect_document_corners(
     if not contours:
         return None
 
-    image_area = image.shape[0] * image.shape[1]
+    image_height, image_width = image.shape[:2]
+    image_area = image_height * image_width
     # 면적 내림차순으로 상위 몇 개만 검사한다: 문서 윤곽은 배경보다 훨씬 크게 잡히므로
     # 대부분 최상위 후보에서 발견되고, 정렬돼 있어 임계값 미만이면 이후도 더 작으니 즉시 중단한다.
     for contour in sorted(contours, key=cv2.contourArea, reverse=True)[:5]:
@@ -100,10 +111,20 @@ def detect_document_corners(
             break
         perimeter = cv2.arcLength(contour, True)
         approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
-        if len(approx) == 4 and cv2.isContourConvex(approx):
-            return _order_corners(approx.reshape(4, 2).astype(np.float32))
+        if len(approx) != 4 or not cv2.isContourConvex(approx):
+            continue
+        _, _, box_width, box_height = cv2.boundingRect(approx)
+        if box_width < image_width * min_dimension_ratio:
+            continue
+        if box_height < image_height * min_dimension_ratio:
+            continue
+        return _order_corners(approx.reshape(4, 2).astype(np.float32))
 
-    logger.info("문서 4각형 윤곽을 찾지 못했습니다 (min_area_ratio=%s)", min_area_ratio)
+    logger.info(
+        "문서 4각형 윤곽을 찾지 못했습니다 (min_area_ratio=%s, min_dimension_ratio=%s)",
+        min_area_ratio,
+        min_dimension_ratio,
+    )
     return None
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import pytest
 
@@ -41,6 +42,56 @@ def test_detect_document_corners_returns_none_without_contrast():
     """배경과 구분되는 윤곽이 없으면(균일한 색) None을 반환해야 한다(예외 아님)."""
     flat_image = np.full((200, 200, 3), 128, dtype=np.uint8)
     assert detect_document_corners(flat_image) is None
+
+
+def test_detect_document_corners_rejects_thin_wide_quad_inside_document():
+    """PRE-1 회귀 테스트: 실사진 재현 버그(min_dimension_ratio 필터).
+
+    우쿨렐레 악보 사진(`IMG_2442 3.jpg`)에서 실제로 벌어진 상황은 "가짜 사각형이
+    문서보다 면적이 커서 이겼다"가 아니라, 배경 대비가 약해 문서 외곽선 자체가
+    깨끗한 4각형 컨투어로 잡히지 않았고, 그 결과 상위 후보 중 면적 조건만 넘긴
+    악보 안 오선+TAB 한 줄(가로로는 이미지 폭 전체에 가깝지만 세로로는 일부만
+    차지)이 선택된 것이었다. 이를 재현하려면 "깨끗한 문서 사각형과의 면적 경쟁"이
+    아니라 "문서 후보 자체가 없는 상황에서 얇은 4각형만 존재하는 경우"를 흉내내야
+    하므로, 여기서는 진짜 문서를 나타내는 사각형을 함께 그리지 않고 얇은 4각형
+    하나만 배치한다.
+
+    `min_dimension_ratio` 파라미터를 직접 조작해 같은 이미지에 대해 두 번 호출함으로써
+    "필터가 없으면(0.0) 이 얇은 4각형이 그대로 검출되고, 필터가 있으면(기본값) 걸러져
+    None이 된다"는 인과관계를 테스트 안에서 직접 증명한다.
+    """
+    height, width = 800, 1000
+    image = np.full((height, width, 3), 40, dtype=np.uint8)  # 배경(어두운 책상 등)
+
+    # 유일한 후보: 가로로 넓고(폭의 90%) 세로로는 얇은(높이의 12.5%) 4각형.
+    # 면적 비율은 min_area_ratio(기본 0.1) 조건을 넘기지만, 세로 치수는
+    # min_dimension_ratio(기본 0.3) 조건에 못 미치도록 설계했다.
+    thin_top_left, thin_bottom_right = (50, 350), (950, 450)
+    cv2.rectangle(image, thin_top_left, thin_bottom_right, (255, 255, 255), thickness=-1)
+
+    thin_width = thin_bottom_right[0] - thin_top_left[0]
+    thin_height = thin_bottom_right[1] - thin_top_left[1]
+    area_ratio = (thin_width * thin_height) / (width * height)
+    assert area_ratio > 0.1, "이 얇은 4각형은 면적 조건은 통과해야 한다(전제 조건 점검)"
+    assert thin_height < height * 0.3, (
+        "이 얇은 4각형은 세로 치수 조건에 걸려야 한다(전제 조건 점검)"
+    )
+
+    # 구버전 동작 재현: min_dimension_ratio를 0으로 두면(필터 없음) 이 얇은
+    # 4각형의 좌표가 그대로(잘못) 검출된다.
+    detected_without_filter = detect_document_corners(image, min_dimension_ratio=0.0)
+    assert detected_without_filter is not None
+    box_w, box_h = cv2.boundingRect(detected_without_filter.astype(np.float32))[2:]
+    assert box_w == pytest.approx(thin_width, abs=10)
+    assert box_h == pytest.approx(thin_height, abs=10)
+
+    # 새 필터 적용(기본값): 세로 치수가 너무 작아 후보에서 제외되고, 다른 후보가
+    # 없으므로 None을 반환해야 한다 — "잘못된 얇은 띠 대신 안전하게 실패"가
+    # 이 수정의 실제 효과다.
+    detected_with_filter = detect_document_corners(image)
+    assert detected_with_filter is None, (
+        "얇은 4각형이 min_dimension_ratio 필터를 통과해서는 안 된다"
+    )
 
 
 def test_correct_perspective_auto_detection_flattens_document(synthetic_text_photo):

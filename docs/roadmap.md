@@ -265,6 +265,16 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 최종 검증: `pytest -q` → 167 passed, 3 skipped(MuseScore/Real-ESRGAN 가중치/oemer 체크포인트 미설치, 기존과 동일한 의도된 스킵). `ruff check .` → 통과.
 - 다음 태스크(#2 Supabase 업로드, #3 자격증명 관리)는 각각 `app/backup/uploader.py`의 `upload_pdf` 시그니처와 `app/backup/settings.py`를 그대로 이어붙이면 된다.
 
+### 🐛 버그 수정: 원근보정 코너 검출 오탐 (실사진 QA로 발견)
+
+- 사용자가 제공한 실제 iPhone 사진(우쿨렐레 악보를 스크린으로 촬영, 4032x3024)으로 전체 파이프라인을 수동 테스트하던 중 발견: `detect_document_corners`(PRE-1)가 문서 페이지 전체가 아니라 악보 안의 오선+TAB 한 줄(가로로는 이미지 폭 전체, 세로로는 약 11%만 차지)을 문서 경계로 잘못 인식해, 원근보정 결과가 완전히 찌그러진 얇은 띠(약 467×2700px)로 잘리는 버그.
+- 근본 원인: 기존 로직은 `min_area_ratio`(면적 비율)만 검사해, "가로는 꽉 차지만 세로는 극히 일부만 차지하는" 극단적으로 치우친 4각형도 면적 조건만 넘으면 통과시켰다(스크린 촬영이라 실제 페이지 외곽 대비가 약해 순위에서 밀려난 것으로 추정).
+- `python-dev-expert`가 수정: `detect_document_corners`에 `min_dimension_ratio: float = 0.3` 파라미터 추가 — 후보 4각형의 `cv2.boundingRect` 기준 폭/높이가 각각 이미지 전체 폭/높이의 30% 이상이어야 통과. 조건을 만족하는 후보가 없으면 기존과 동일하게 `None`을 반환(→ `correct_perspective`가 `DocumentCornersNotFoundError`로 변환, 계약 유지). 실제 문제 사진으로 재검증: 수정 전 파라미터(0.0)로는 버그가 그대로 재현되고, 기본값(0.3)으로는 잘못된 얇은 좌표 대신 안전하게 `None`을 반환함을 확인.
+- `code-reviewer`가 1차 검토에서 HIGH 1건 발견: 처음 작성된 회귀 테스트가 실제 문서 사각형(면적 大, 채워 그림)과 그 "안에" 포함된 가짜 얇은 사각형(면적 小)을 함께 그렸는데, 포함된 도형의 면적이 포함하는 도형보다 클 수 없다는 기하학적 모순 때문에 수정 전/후 코드 양쪽에서 항상 통과해 회귀 방어력이 없었음. `python-dev-expert`가 재설계: 진짜 문서 사각형은 그리지 않고 얇은 4각형 하나만 배치한 뒤, 같은 이미지에 `min_dimension_ratio=0.0`(구버전 재현, 검출됨)과 기본값(신버전, `None`)을 각각 호출해 인과관계를 직접 증명하도록 변경. 재검토 결과 HIGH/MEDIUM 없음.
+- MEDIUM(참고, 미반영): 기본값 0.3의 실측 근거가 다양한 사진으로 sweep되지 않았고, 회전된(축에 정렬되지 않은) 얇은 사각형까지는 못 막는 잔여 한계가 있음 — 다만 실패 시에도 크래시가 아니라 안전한 `DocumentCornersNotFoundError` 폴백이라 심각도 낮음.
+- 이번에 실사진 테스트로 함께 발견된 별개 이슈(오선+TAB 병기 악보가 SCORE로 자동분류되지 않음)는 사용자 지시로 이번 수정 범위에서 제외, 별도 로드맵 항목 없이 보류.
+- 최종 검증: `tests/preprocess/ -q` → 48 passed, 1 skipped(기존과 동일한 의도된 스킵). `ruff check .` → 통과.
+
 ## 다음 진행 방식
 
 - 담당 에이전트: 구현은 `python-dev-expert`, 테스트는 `qa-test-engineer`, 진행상황 총괄은 `product-manager`, 커밋 전 검토는 `code-reviewer`.
