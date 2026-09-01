@@ -91,6 +91,16 @@ Phase4-4(RT-1 수동 오버라이드): 자르기/회전 그룹박스 바로 아�
 미실행" 조건 갱신 메서드를 `_refresh_manual_correction_controls`로 이름을 바꾸고
 자르기/회전 버튼뿐 아니라 문서 유형 콤보박스/적용 버튼도 함께 갱신하도록 확장했다
 (둘 다 "문서 유형과 무관한 공통 보정"이라는 같은 활성화 조건을 공유하기 때문).
+
+Phase5-1(BKP-1, 로컬 저장 우선 보장 + 백업 설정 UI): 툴바에 "백업 사용"
+체크박스를 추가해 `app.backup.BackupSettings`(QSettings 기반, 기본값 False)에
+상태를 즉시 저장/복원한다. `_on_save_clicked()`가 로컬 PDF 저장(GUI-4)을 실제로
+마친 뒤에만 `_attempt_backup()` 훅을 호출하도록 순서를 고정한다 — 백업이
+꺼져 있으면 훅 자체가 아무 것도 하지 않고(오프라인 보장, BKP-3의 전조), 켜져
+있어도 실제 업로드(`app.backup.uploader.upload_pdf`)는 아직 Phase5-2가 채울
+no-op 스텁이다. `_attempt_backup()`은 훅 호출을 try/except로 감싸 예외가
+전파되지 않게 해, 백업 실패가 이미 끝난 로컬 저장 결과나 GUI 반응성에 영향을
+주지 않게 한다(BKP-1 핵심 계약).
 """
 
 from __future__ import annotations
@@ -107,6 +117,7 @@ from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -124,6 +135,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.backup.settings import BackupSettings
+from app.backup.uploader import upload_pdf
 from app.gui.crop_rotate_dialog import CropRotateDialog
 from app.gui.worker import PageResult, ProcessingWorker, ReprocessWorker, VectorizeWorker
 from app.pdf_assembly.assemble import assemble_pdf
@@ -182,6 +195,8 @@ class MainWindow(QMainWindow):
         self._merged_pdf_path: Path | None = None
         self._reviewed_input_path: Path | None = None
         """텍스트 검수 위젯이 현재 어느 입력 파일의 결과를 보여주고 있는지 (수정 반영 대상)."""
+        self._backup_settings = BackupSettings()
+        """Phase5-1(BKP-1): 백업 활성화 여부(기본값 False)를 저장/조회하는 얇은 래퍼."""
 
         self._build_ui()
 
@@ -221,6 +236,18 @@ class MainWindow(QMainWindow):
         self.save_button.setEnabled(False)
         self.save_button.clicked.connect(self._on_save_clicked)
         layout.addWidget(self.save_button)
+
+        backup_checkbox = QCheckBox("백업 사용")
+        backup_checkbox.setToolTip(
+            "켜면 PDF를 로컬에 저장한 뒤 클라우드 백업을 시도합니다"
+            "(현재는 자리만 마련된 상태이며 실제 업로드는 아직 구현되지 않았습니다)."
+        )
+        # 저장된 값으로 먼저 초기화한 뒤 시그널을 연결해, 초기화 과정에서
+        # `_on_backup_enabled_toggled`가 불필요하게 호출되지 않게 한다.
+        backup_checkbox.setChecked(self._backup_settings.is_backup_enabled())
+        backup_checkbox.toggled.connect(self._on_backup_enabled_toggled)
+        layout.addWidget(backup_checkbox)
+        self.backup_enabled_checkbox = backup_checkbox
 
         return layout
 
@@ -455,6 +482,14 @@ class MainWindow(QMainWindow):
 
         total = self.file_list_widget.count()
         self.status_label.setText(f"이미지 {added}개를 추가했습니다. (총 {total}개)")
+
+    # ------------------------------------------------------------------
+    # Phase5-1(BKP-1): 백업 설정
+    # ------------------------------------------------------------------
+
+    def _on_backup_enabled_toggled(self, checked: bool) -> None:
+        """"백업 사용" 체크박스 상태를 즉시 `BackupSettings`에 영속화한다."""
+        self._backup_settings.set_backup_enabled(checked)
 
     def _image_paths_in_list(self) -> list[Path]:
         return [
@@ -1325,6 +1360,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "저장 실패", str(exc))
             return
         self.status_label.setText(f"저장했습니다: {save_path}")
+        self._attempt_backup(Path(save_path))
+
+    def _attempt_backup(self, saved_pdf_path: Path) -> None:
+        """BKP-1/BKP-3: 로컬 저장이 끝난 뒤에만 호출되는 백업 훅.
+
+        백업이 꺼져 있으면 아무 것도 하지 않고 즉시 반환한다(오프라인 보장).
+        켜져 있을 때도 `upload_pdf`(현재는 Phase5-2가 채울 no-op 스텁)를
+        try/except로 감싸, 백업이 실패하거나 예외를 던져도 이미 완료된 로컬
+        저장 결과나 GUI 반응성에 전혀 영향을 주지 않게 한다 — BKP-1 수용 기준의
+        핵심("백업 실패가 로컬 저장 결과에 영향을 주지 않는다").
+
+        주의: 지금은 `upload_pdf`가 즉시 반환하는 no-op이라 동기 호출이어도
+        무해하다. Phase5-2에서 실제 네트워크 호출을 채워 넣을 때는 GUI 스레드를
+        블로킹하지 않도록 별도 QThread(예: `ProcessingWorker`/`VectorizeWorker`와
+        같은 패턴)로 옮기는 것을 고려해야 한다.
+        """
+        if not self._backup_settings.is_backup_enabled():
+            return
+        try:
+            upload_pdf(saved_pdf_path)
+        except Exception:  # noqa: BLE001 - 백업 실패가 로컬 저장 결과에 영향을 주면 안 되는 경계
+            logger.exception(
+                "백업 업로드 중 오류가 발생했습니다 (로컬 저장 결과에는 영향 없음): %s",
+                saved_pdf_path,
+            )
 
     # ------------------------------------------------------------------
     # 종료 처리

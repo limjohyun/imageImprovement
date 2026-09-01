@@ -57,7 +57,7 @@
 
 | # | Task | 요구사항 ID | 의존 | ID | 상태 |
 |---|---|---|---|---|---|
-| 1 | 로컬 저장 우선 보장 + 백업 설정 UI(기본 off) | BKP-1 | Phase4#5 | `90830178` | ⬜ 대기 |
+| 1 | 로컬 저장 우선 보장 + 백업 설정 UI(기본 off) | BKP-1 | Phase4#5 | `90830178` | ✅ 완료 |
 | 2 | Supabase 업로드 구현 | BKP-2 | #1, #3 | `005aed8e` | ⬜ 대기 |
 | 3 | 자격증명 관리 (.env) | BKP-4 | #1 | `84f668f8` | ⬜ 대기 |
 | 4 | Phase5 End-to-End 검증 (오프라인 보장 포함) | BKP-3, §9 Phase5 | #2, #3 | `ab376901` | ⬜ 대기 |
@@ -256,6 +256,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 테스트 전용 변경(프로덕션 코드 수정 없음)이라 Phase2-5/Phase3-5 선례대로 별도 `code-reviewer` 단계 없이 진행. 발견된 프로덕션 결함 없음(도형 이미지를 강제로 OCR해도 Tesseract/OCRmyPDF가 예외 없이 빈 텍스트를 정상 반환하며 파이프라인이 끝까지 완주함을 확인).
 - 최종 검증: `tests/gui/test_e2e_phase4.py` → 1 passed(Tesseract/Ghostscript/qpdf가 설치된 이 머신에서 skip 없이 실제 파이프라인 전체 실행). `ruff check .` → 통과.
 - **Phase4(GUI 고도화) 전체 완료.** 다음은 Phase5(선택적 클라우드 백업, 낮은 우선순위) — 아직 시작 전.
+
+### ✅ Phase5-1: 로컬 저장 우선 보장 + 백업 설정 UI(기본 off) — 완료
+
+- `python-dev-expert`가 구현: 신규 `app/backup/` 패키지 — `settings.py`(`BackupSettings`, `QSettings` 기반으로 백업 활성화 여부를 저장/조회, 기본값 `False`, `qsettings` 인스턴스 주입 지점을 열어 테스트가 실제 사용자 프리퍼런스 파일을 건드리지 않게 함), `uploader.py`(`upload_pdf(pdf_path, *, document_type=None)` — 로그만 남기는 no-op 스텁, Phase5-2가 채울 자리). `app/gui/main_window.py` 툴바에 "백업 사용" 체크박스 추가(저장값으로 초기화 후 시그널 연결, 토글 시 `BackupSettings`에 즉시 영속화), `_on_save_clicked()`가 로컬 PDF 저장(`shutil.copy2`)이 예외 없이 끝난 뒤에만 `_attempt_backup()`을 호출하도록 순서 고정 — 백업이 꺼져 있으면 `upload_pdf` 호출 자체가 스킵되고(오프라인 보장), 켜져 있어도 호출을 `try/except Exception`으로 감싸 실패가 로컬 저장 결과·GUI 반응성에 전혀 영향을 주지 않게 함(BKP-1 핵심 계약). `supabase-py` 등 실제 업로드 의존성은 이번 태스크 범위 밖이라 추가하지 않음(Phase5-2 몫).
+- `code-reviewer`가 검토: HIGH/MEDIUM 없음. 로컬 저장→백업 순서 역전 경로 없음, 예외가 `except Exception`으로 완전히 격리됨, 백업 off일 때 `upload_pdf` 호출 자체가 스킵됨(테스트로 검증됨), `QSettings` 사용이 이 프로젝트에서 유일하며 테스트가 격리된 인스턴스를 사용해 실제 사용자 설정을 오염시키지 않음을 확인. LOW 2건은 차단 사유 아니라고 판단해 반영하지 않음: (1) `app/backup/__init__.py`의 재노출 파사드가 현재 아무 호출부에서도 쓰이지 않음 — 그러나 `app/router/__init__.py`/`app/preprocess/__init__.py`와 동일한 기존 컨벤션이라 일관성 유지 차원에서 그대로 둠, (2) 백업 체크박스가 활성화 가능한데 실제로는 아직 아무 일도 하지 않는 것은 제품 관점의 논의 대상이나 툴팁으로 이미 정직하게 고지돼 있어 코드 결함 아님.
+- 신규 테스트: `tests/backup/test_settings.py`(기본값 off, 저장/복원, bool 타입 캐스팅 확인), `tests/gui/test_backup_hook.py`(체크박스 기본값/토글 영속화, 백업 off일 때 `upload_pdf` 미호출, `upload_pdf`가 예외를 던져도 로컬 저장은 그대로 성공).
+- 최종 검증: `pytest -q` → 167 passed, 3 skipped(MuseScore/Real-ESRGAN 가중치/oemer 체크포인트 미설치, 기존과 동일한 의도된 스킵). `ruff check .` → 통과.
+- 다음 태스크(#2 Supabase 업로드, #3 자격증명 관리)는 각각 `app/backup/uploader.py`의 `upload_pdf` 시그니처와 `app/backup/settings.py`를 그대로 이어붙이면 된다.
 
 ## 다음 진행 방식
 
