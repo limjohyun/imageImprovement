@@ -292,6 +292,15 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 최종 검증: `tests/preprocess/ -q` → 51 passed, 1 skipped(기존과 동일한 의도된 스킵). `ruff check .` → 통과.
 - 다음: Task2(수동 코너 오버라이드 GUI 연결)로 계속 진행.
 
+### ✅ Task2: PRE-1 원근보정 수동 코너 오버라이드 GUI 연결 완료 (실사진 대응 계획 전체 완료)
+
+- `python-dev-expert`가 구현: `app/gui/crop_rotate_dialog.py`에 `PerspectiveCorrectionDialog`(좌상/우상/우하/좌하 4점 각각 x,y 스핀박스 8개 — Phase4-1에서 사용자가 이미 합의한 숫자 입력 방식 그대로 재사용, 드래그 UI 없음) 신규 추가. `app/gui/worker.py`의 `PageResult`에 `corners: np.ndarray | None = None` 필드 추가. `app/gui/main_window.py`에 "원근 보정(수동)" 버튼과 `_on_perspective_correction_clicked` 핸들러 추가 — 자동 검출을 먼저 시도해 성공하면 그 좌표를, 실패하면(실사진에서 가장 흔한 케이스) 이미지 네 귀퉁이를 다이얼로그 초기값으로 채운다. 세 재처리 진입점(`_on_crop_rotate_clicked`/`_on_type_override_apply_clicked`/`_on_perspective_correction_clicked`) 모두 `.start()` 이후 가드 갱신, 워커 인스턴스 클로저 캡처 등 Phase4-1/4-4에서 이미 검증된 패턴을 그대로 재사용. `PageResult.corners`도 `crop_rect`/`rotation_degrees`/`type_override`와 동일하게 세 진입점 사이에서 대칭적으로 보존되도록 구현(어느 진입점을 써도 다른 필드가 조용히 사라지지 않음).
+- `code-reviewer`가 1차 검토에서 HIGH 1건 발견 및 재현: 이월된 `corners`가 자르기/회전으로 이미지 크기가 바뀐 뒤에도 재투영 없이 그대로 `warp_to_corners`에 전달되어, 크래시나 예외 없이 대부분 검은 뒤틀린 이미지를 조용히 만들어낼 수 있음(100x100 기준 좌표를 40x40 이미지에 그대로 써서 직접 재현 — 유효 영역 약 16%만 남고 나머지 검은색). `crop_rect`는 범위를 벗어나면 명시적으로 `ValueError`를 던지는데 `corners`만 이 방어가 없어 세 필드 간 방어 수준이 비대칭이었음.
+- `python-dev-expert`가 수정: `_preprocess_config_for_corners(corners, image_shape)`에 범위 검증을 추가해, 이월된 코너가 재처리 시점 이미지 크기(`corrected_image.shape[:2]`) 범위를 벗어나면 폐기하고 `None`(자동 검출 폴백)을 반환하도록 함. 세 진입점 모두 이 반환값이 `None`인지로 판단해 `corners` 자체를 초기화하고(같은 무효 좌표가 다음 재처리마다 반복 폐기되는 것 방지) 상태 메시지로 사용자에게 알림. `_on_perspective_correction_clicked`의 인라인 중복 로직도 이 헬퍼로 통일(LOW 지적 반영). 이 한계를 `PageResult.corners`/헬퍼 docstring에 명시.
+- 재검토 결과 HIGH/MEDIUM 없음. 신규 회귀 테스트(`test_manual_corners_discarded_when_new_crop_changes_image_size`)로 "크기가 바뀌면 폐기, 안 바뀌면 유지"를 정확히 구분해 검증.
+- 최종 검증: `tests/gui/test_perspective_correction.py`/`test_crop_rotate_guards.py`/`test_crop_rotate_reprocess.py`/`test_worker_routing.py` → 18 passed. `ruff check .` → 통과.
+- **PRE-1 원근보정 실사진 QA 대응 계획(Task1+Task2) 전체 완료.** 콘텐츠 기반 자동 디워핑(3단계)은 계획대로 조건부 보류 유지 — 밝기/회전/수동 오버라이드가 모두 반영된 상태로 재측정해 필요할 때 별도 계획.
+
 ## 다음 진행 방식
 
 - 담당 에이전트: 구현은 `python-dev-expert`, 테스트는 `qa-test-engineer`, 진행상황 총괄은 `product-manager`, 커밋 전 검토는 `code-reviewer`.

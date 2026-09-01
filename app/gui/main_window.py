@@ -92,6 +92,26 @@ Phase4-4(RT-1 수동 오버라이드): 자르기/회전 그룹박스 바로 아�
 자르기/회전 버튼뿐 아니라 문서 유형 콤보박스/적용 버튼도 함께 갱신하도록 확장했다
 (둘 다 "문서 유형과 무관한 공통 보정"이라는 같은 활성화 조건을 공유하기 때문).
 
+PRE-1(GUI 수동 코너 오버라이드): 자동 원근보정(`app.preprocess.perspective.
+correct_perspective`)은 "배경 없이 프레임을 꽉 채운 사진"에서 거의 항상 실패한다
+(자동 검출 시 `DocumentCornersNotFoundError`, GUI는 기본적으로 `skip_perspective_
+on_failure=True`라 조용히 건너뛴다). 자르기/회전(Phase4-1), 문서 유형(Phase4-4)과
+같은 "공통 보정" 그룹에 "원근 보정 (수동)" 버튼을 두어, `PerspectiveCorrectionDialog`
+(숫자 입력 방식)로 4모서리 좌표를 직접 지정한 뒤 `PreprocessConfig(corners=...,
+skip_perspective_on_failure=False)`로 `ReprocessWorker`를 다시 실행한다. 초기값은
+이전에 지정한 `PageResult.corners`가 있으면 그 값, 없으면 `detect_document_corners`를
+한 번 시도해 성공하면 그 좌표, 실패하면(가장 흔한 실제 케이스) 이미지 네 귀퉁이를
+채운다. `crop_rect`/`rotation_degrees`/`type_override`와 대칭적으로, 자르기/회전
+또는 문서 유형만 다시 조정해도 이미 지정해 둔 `corners`가 조용히 사라지지 않도록
+세 핸들러(`_on_crop_rotate_clicked`/`_on_type_override_apply_clicked`/
+`_on_perspective_correction_clicked`) 모두 `result.corners`를 서로 이어받는다.
+단, 이 이어받기는 이미지 크기가 바뀌지 않았을 때만 유효하다 — 자르기/회전으로
+이미지 크기가 달라지면 이전 좌표는 더 이상 맞지 않으므로(범위 밖 좌표로 원근
+변환하면 예외 없이 대부분 검은색인 손상된 이미지가 조용히 만들어진다),
+`_preprocess_config_for_corners()`가 재처리 시점 이미지 크기와 비교해 범위를
+벗어나면 폐기하고 자동 검출로 되돌리며 상태표시줄로 알린다(HIGH, code-reviewer
+지적).
+
 Phase5-1(BKP-1, 로컬 저장 우선 보장 + 백업 설정 UI): 툴바에 "백업 사용"
 체크박스를 추가해 `app.backup.BackupSettings`(QSettings 기반, 기본값 False)에
 상태를 즉시 저장/복원한다. `_on_save_clicked()`가 로컬 PDF 저장(GUI-4)을 실제로
@@ -112,6 +132,7 @@ import tempfile
 from pathlib import Path
 
 import cv2
+import numpy as np
 import pymupdf
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QKeySequence, QPixmap, QShortcut
@@ -137,10 +158,12 @@ from PySide6.QtWidgets import (
 
 from app.backup.settings import BackupSettings
 from app.backup.uploader import upload_pdf
-from app.gui.crop_rotate_dialog import CropRotateDialog
+from app.gui.crop_rotate_dialog import CropRotateDialog, PerspectiveCorrectionDialog
 from app.gui.worker import PageResult, ProcessingWorker, ReprocessWorker, VectorizeWorker
 from app.pdf_assembly.assemble import assemble_pdf
 from app.preprocess.manual_correction import apply_manual_correction
+from app.preprocess.perspective import detect_document_corners
+from app.preprocess.pipeline import PreprocessConfig
 from app.processors.diagram import VECTORIZATION_DISCLAIMER
 from app.processors.score import ScoreRendererUnavailableError, open_score_in_external_editor
 from app.router.classifier import DocumentType
@@ -329,9 +352,9 @@ class MainWindow(QMainWindow):
         return wrapper
 
     def _build_crop_rotate_group(self) -> QGroupBox:
-        """Phase4-1(GUI-3 일부): 문서 유형과 무관하게 모든 처리된 페이지에서 쓸 수 있는
-        자르기/회전 기본 보정 버튼."""
-        group = QGroupBox("자르기 / 회전 보정")
+        """Phase4-1(GUI-3 일부)+PRE-1(GUI 수동 코너 오버라이드): 문서 유형과 무관하게
+        모든 처리된 페이지에서 쓸 수 있는 자르기/회전/원근보정 기본 보정 버튼들."""
+        group = QGroupBox("공통 보정")
         group_layout = QVBoxLayout(group)
 
         button = QPushButton("자르기 / 회전...")
@@ -339,6 +362,12 @@ class MainWindow(QMainWindow):
         button.clicked.connect(self._on_crop_rotate_clicked)
         group_layout.addWidget(button)
         self.crop_rotate_button = button
+
+        perspective_button = QPushButton("원근 보정 (수동)...")
+        perspective_button.setEnabled(False)
+        perspective_button.clicked.connect(self._on_perspective_correction_clicked)
+        group_layout.addWidget(perspective_button)
+        self.perspective_correction_button = perspective_button
 
         return group
 
@@ -792,9 +821,10 @@ class MainWindow(QMainWindow):
             self.review_stack.setCurrentWidget(self._text_review_page)
 
     def _refresh_manual_correction_controls(self, path: Path) -> None:
-        """Phase4-1(GUI-3 일부)+Phase4-4(RT-1 수동 오버라이드): 선택된 페이지가 이미
-        처리된 경우에만 자르기/회전 버튼과 문서 유형 콤보박스/적용 버튼을 활성화한다.
-        문서 유형과 무관하게 모든 유형에서 동작하는 범용 기능이다.
+        """Phase4-1(GUI-3 일부)+Phase4-4(RT-1 수동 오버라이드)+PRE-1(GUI 수동 코너
+        오버라이드): 선택된 페이지가 이미 처리된 경우에만 자르기/회전 버튼, 원근
+        보정(수동) 버튼, 문서 유형 콤보박스/적용 버튼을 활성화한다. 문서 유형과
+        무관하게 모든 유형에서 동작하는 범용 기능이다.
 
         code-reviewer HIGH #1 지적: 결과가 있어도 전체 배치 처리(`ProcessingWorker`)가
         아직 실행 중이면 비활성화한다 — 그렇지 않으면 배치가 `merged.pdf`를 쓰는
@@ -813,6 +843,7 @@ class MainWindow(QMainWindow):
             result is not None and not self._is_batch_processing() and not self._is_reprocessing()
         )
         self.crop_rotate_button.setEnabled(can_reprocess)
+        self.perspective_correction_button.setEnabled(can_reprocess)
 
         self.type_override_apply_button.setEnabled(can_reprocess)
         with QSignalBlocker(self.type_override_combo):
@@ -846,6 +877,7 @@ class MainWindow(QMainWindow):
         self.vectorization_disclaimer_label.setText("")
         self.open_in_musescore_button.setEnabled(False)
         self.crop_rotate_button.setEnabled(False)
+        self.perspective_correction_button.setEnabled(False)
         self.type_override_apply_button.setEnabled(False)
         with QSignalBlocker(self.type_override_combo):
             self.type_override_combo.setEnabled(False)
@@ -1061,11 +1093,33 @@ class MainWindow(QMainWindow):
         # 문서 유형 오버라이드(있다면)는 그대로 이어간다 — 유형은 그대로 두고 자르기/
         # 회전만 바꿨는데 유형이 조용히 자동으로 되돌아가면 안 된다.
         type_override = result.type_override
+        # PRE-1: 자르기/회전만 다시 조정하는 요청이므로, 이미 지정된 수동 원근보정
+        # 코너(있다면)도 함께 이어간다 — 그렇지 않으면 사용자가 힘들게 지정한 코너가
+        # 자르기/회전만 바꿔도 조용히 사라진다(type_override와 동일한 종류의 회귀).
+        corners = result.corners
+        preprocess_config = self._preprocess_config_for_corners(
+            corners, corrected_image.shape[:2]
+        )
+        if corners is not None and preprocess_config is None:
+            # HIGH(code-reviewer 지적): 새 자르기/회전으로 이미지 크기가 바뀌어 이전
+            # 코너 좌표가 더 이상 유효하지 않다 — 폐기하고 자동 검출로 되돌아간다는
+            # 것을 사용자에게 알린다.
+            corners = None
+            status_message = (
+                "이전 원근보정 좌표가 새 자르기 크기와 맞지 않아 자동 검출로 "
+                f"되돌렸습니다: {path.name}"
+            )
+        else:
+            status_message = f"보정을 반영해 다시 처리하는 중: {path.name}"
         self._disable_manual_correction_controls()
-        self.status_label.setText(f"보정을 반영해 다시 처리하는 중: {path.name}")
+        self.status_label.setText(status_message)
 
         worker = ReprocessWorker(
-            corrected_image, path, result.page_pdf_path, type_override=type_override
+            corrected_image,
+            path,
+            result.page_pdf_path,
+            preprocess_config=preprocess_config,
+            type_override=type_override,
         )
         # MEDIUM #3(code-reviewer 지적): `finished`/`error_occurred`가 GUI 스레드에서
         # 실제로 처리되기까지는 좁은 시간차가 있다. 그 사이 사용자가 같은 페이지를
@@ -1077,7 +1131,7 @@ class MainWindow(QMainWindow):
         )
         worker.finished.connect(
             lambda w=worker: self._on_reprocess_finished(
-                w, path, rotation_degrees, crop_rect, type_override
+                w, path, rotation_degrees, crop_rect, type_override, corners=corners
             )
         )
         self._reprocess_worker = worker
@@ -1086,14 +1140,50 @@ class MainWindow(QMainWindow):
         worker.start()
         self._refresh_list_editing_controls()
 
+    def _preprocess_config_for_corners(
+        self, corners: np.ndarray | None, image_shape: tuple[int, int]
+    ) -> PreprocessConfig | None:
+        """PRE-1: 이 페이지에 이미 지정된 수동 원근보정 코너(있다면)를 재처리에도
+        그대로 반영한다.
+
+        `corners`가 있으면 `skip_perspective_on_failure=False`로 강제해 그 좌표를
+        무조건 사용하게 한다(사용자가 명시적으로 지정한 값이므로 자동 검출로 되돌아가면
+        안 된다). 없으면 `None`을 그대로 반환해 기존과 동일하게 기본 `PreprocessConfig`
+        (자동 검출, 실패 시 건너뛰기)에 맡긴다.
+
+        `image_shape`(`(height, width)`, 이번 재처리에 실제로 넘길 `corrected_image`
+        기준)와 비교해 `corners`가 이 범위(`[0, width] x [0, height]`)를 벗어나면
+        폐기하고 `None`을 반환한다(HIGH, code-reviewer 지적) — `corners`는 그것이
+        지정됐던 당시 이미지 크기 기준 좌표라서, 이후 자르기/회전으로 이미지 크기가
+        바뀌면 더 이상 유효하지 않다. `warp_to_corners`/`cv2.warpPerspective`는 범위
+        밖 좌표를 예외 없이 조용히 받아들여 대부분 검은색인 손상된 이미지를 만들어
+        내므로, 여기서 미리 걸러 자동 검출로 안전하게 폴백시켜야 한다. 상태 메시지
+        표시는 호출부(세 재처리 진입점)가 이 반환값이 `None`인지(원래 `corners`가
+        `None`이 아니었는데도)로 판단해 담당한다.
+        """
+        if corners is None:
+            return None
+        height, width = image_shape
+        out_of_bounds = (
+            np.any(corners[:, 0] < 0)
+            or np.any(corners[:, 0] > width)
+            or np.any(corners[:, 1] < 0)
+            or np.any(corners[:, 1] > height)
+        )
+        if out_of_bounds:
+            return None
+        return PreprocessConfig(corners=corners, skip_perspective_on_failure=False)
+
     def _disable_manual_correction_controls(self) -> None:
         """재처리를 시작하는 순간 자르기/회전 버튼과 문서 유형 컨트롤을 모두 잠근다.
 
         재처리 진행 중에는 어느 쪽으로 다시 클릭해도 같은 페이지에 대한 두 번째
-        `ReprocessWorker`가 겹쳐 시작되면 안 되므로, 두 진입점(`_on_crop_rotate_
-        clicked`/`_on_type_override_apply_clicked`)이 공통으로 호출한다.
+        `ReprocessWorker`가 겹쳐 시작되면 안 되므로, 세 진입점(`_on_crop_rotate_
+        clicked`/`_on_type_override_apply_clicked`/`_on_perspective_correction_clicked`)이
+        공통으로 호출한다.
         """
         self.crop_rotate_button.setEnabled(False)
+        self.perspective_correction_button.setEnabled(False)
         self.type_override_apply_button.setEnabled(False)
         self.type_override_combo.setEnabled(False)
 
@@ -1140,11 +1230,32 @@ class MainWindow(QMainWindow):
             return
 
         type_override: DocumentType | None = self.type_override_combo.currentData()
+        # PRE-1: 유형만 바꾸는 요청이므로, 이미 지정된 수동 원근보정 코너(있다면)도
+        # 그대로 이어간다 — `_on_crop_rotate_clicked`와 대칭적인 보존.
+        corners = result.corners
+        preprocess_config = self._preprocess_config_for_corners(
+            corners, corrected_image.shape[:2]
+        )
+        if corners is not None and preprocess_config is None:
+            # `_on_crop_rotate_clicked`와 동일한 이유(HIGH, code-reviewer 지적)로
+            # 자르기/회전이 이어받은 이전 코너가 이 재처리 결과 이미지 크기와 맞지
+            # 않으면 폐기하고 사용자에게 알린다.
+            corners = None
+            status_message = (
+                "이전 원근보정 좌표가 새 자르기 크기와 맞지 않아 자동 검출로 "
+                f"되돌렸습니다: {path.name}"
+            )
+        else:
+            status_message = f"문서 유형을 다시 지정해 처리하는 중: {path.name}"
         self._disable_manual_correction_controls()
-        self.status_label.setText(f"문서 유형을 다시 지정해 처리하는 중: {path.name}")
+        self.status_label.setText(status_message)
 
         worker = ReprocessWorker(
-            corrected_image, path, result.page_pdf_path, type_override=type_override
+            corrected_image,
+            path,
+            result.page_pdf_path,
+            preprocess_config=preprocess_config,
+            type_override=type_override,
         )
         # `_on_crop_rotate_clicked`와 동일한 이유(MEDIUM #3)로 워커 인스턴스를 클로저로
         # 고정해 넘긴다.
@@ -1153,7 +1264,114 @@ class MainWindow(QMainWindow):
         )
         worker.finished.connect(
             lambda w=worker: self._on_reprocess_finished(
-                w, path, rotation_degrees, crop_rect, type_override
+                w, path, rotation_degrees, crop_rect, type_override, corners=corners
+            )
+        )
+        self._reprocess_worker = worker
+        # code-reviewer HIGH 지적: start() 호출 전에는 isRunning()이 항상 False이므로
+        # 반드시 start() 이후에 갱신해야 한다.
+        worker.start()
+        self._refresh_list_editing_controls()
+
+    def _on_perspective_correction_clicked(self) -> None:
+        """PRE-1: 자동 원근보정이 실패했거나(가장 흔한 실제 케이스 — 배경 없이
+        프레임을 꽉 채운 사진) 결과가 마음에 들지 않을 때, 사용자가 문서 4모서리
+        좌표를 직접 지정해 다시 처리한다.
+
+        `_on_crop_rotate_clicked`/`_on_type_override_apply_clicked`와 같은 패턴을
+        쓰되, 좌표 입력 다이얼로그를 새로 연다는 점만 다르다 — 이미 저장된
+        `crop_rect`/`rotation_degrees`를 그대로 raw 이미지에 재적용해 "코너를
+        지정할 대상 이미지"(자르기/회전까지 끝난 상태)를 만든 뒤, 그 위에서 코너를
+        입력받는다.
+        """
+        items = self.file_list_widget.selectedItems()
+        if not items:
+            return
+        path = Path(items[0].data(_PATH_ROLE))
+        result = self._results_by_input.get(str(path.resolve()))
+        if result is None or self._work_dir is None:
+            return
+        if self._is_batch_processing():
+            QMessageBox.warning(
+                self, "처리 중", "전체 배치 처리가 진행 중입니다. 완료 후 다시 시도하세요."
+            )
+            return
+        if self._is_reprocessing():
+            QMessageBox.warning(self, "재처리 진행 중", "이미 재처리가 진행 중입니다.")
+            return
+
+        raw_image = cv2.imread(str(path))
+        if raw_image is None:
+            QMessageBox.critical(
+                self, "이미지 읽기 실패", f"원본 이미지를 읽을 수 없습니다: {path}"
+            )
+            return
+
+        # PRE-1: 원근보정 코너는 자르기/회전이 이미 적용된 이미지 좌표계를 기준으로
+        # 지정해야 사용자가 보는 화면과 일치한다 — 자르기/회전 다이얼로그(Phase4-1)와
+        # 동일하게 이미 저장된 값을 그대로 재적용해 그 기준 이미지를 만든다.
+        rotation_degrees = result.rotation_degrees
+        crop_rect = result.crop_rect
+        try:
+            corrected_image = apply_manual_correction(
+                raw_image, rotation_degrees=rotation_degrees, crop_rect=crop_rect
+            )
+        except ValueError as exc:
+            QMessageBox.critical(self, "보정 실패", str(exc))
+            return
+
+        height, width = corrected_image.shape[:2]
+        initial_corners = result.corners
+        if initial_corners is None:
+            # 이전에 지정한 값이 없으면 자동 검출을 한 번 시도해 성공하면 그 좌표를
+            # 초기값으로 보여준다(처음부터 다시 입력하지 않고 조정만 하면 되게).
+            initial_corners = detect_document_corners(corrected_image)
+        # 자동 검출도 실패하면(배경 없이 프레임을 꽉 채운 사진에서 가장 흔한 실제
+        # 케이스) `PerspectiveCorrectionDialog`가 알아서 이미지 네 귀퉁이를 기본값으로
+        # 채운다 — 여기서는 `None`을 그대로 넘긴다.
+        dialog = PerspectiveCorrectionDialog(
+            width, height, initial_corners=initial_corners, parent=self
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+
+        corners = dialog.corners()
+        # PRE-1: 원근보정 코너만 다시 조정하는 요청이므로, 이 페이지에 이미 지정된
+        # 문서 유형 오버라이드(있다면)는 그대로 이어간다 — 다른 두 핸들러와 동일한
+        # 대칭 보존 원칙.
+        type_override = result.type_override
+        # LOW(code-reviewer 지적): 다른 두 핸들러와 동일하게 헬퍼를 거친다. 여기서는
+        # `corners`가 항상 방금 받은 `dialog.corners()` 결과라 스핀박스 범위 제약상
+        # `corrected_image` 크기를 벗어날 수 없으므로 실질적으로 폐기되지 않지만,
+        # 세 진입점을 한 가지 방식으로 통일해 둔다.
+        preprocess_config = self._preprocess_config_for_corners(
+            corners, corrected_image.shape[:2]
+        )
+        if preprocess_config is None:
+            corners = None
+            status_message = (
+                "이전 원근보정 좌표가 새 자르기 크기와 맞지 않아 자동 검출로 "
+                f"되돌렸습니다: {path.name}"
+            )
+        else:
+            status_message = f"원근 보정을 반영해 다시 처리하는 중: {path.name}"
+        self._disable_manual_correction_controls()
+        self.status_label.setText(status_message)
+
+        worker = ReprocessWorker(
+            corrected_image,
+            path,
+            result.page_pdf_path,
+            preprocess_config=preprocess_config,
+            type_override=type_override,
+        )
+        # 다른 두 핸들러와 동일한 이유(MEDIUM #3)로 워커 인스턴스를 클로저로 고정해 넘긴다.
+        worker.error_occurred.connect(
+            lambda message, w=worker, p=path: self._on_reprocess_error(w, message, p)
+        )
+        worker.finished.connect(
+            lambda w=worker: self._on_reprocess_finished(
+                w, path, rotation_degrees, crop_rect, type_override, corners=corners
             )
         )
         self._reprocess_worker = worker
@@ -1188,8 +1406,14 @@ class MainWindow(QMainWindow):
         rotation_degrees: int,
         crop_rect: tuple[int, int, int, int] | None,
         type_override: DocumentType | None,
+        *,
+        corners: np.ndarray | None = None,
     ) -> None:
         """재처리가 끝나면 `PageResult`를 갱신하고 최종 병합 PDF를 다시 만든다.
+
+        `corners`(PRE-1, 키워드 전용, 기본값 `None`): 이번 재처리 요청에 실제로
+        쓰인 수동 원근보정 코너. 기존 호출부(테스트 포함)가 위치 인자 5개만으로도
+        계속 호출할 수 있도록 새 필드는 반드시 키워드 전용으로 추가한다.
 
         `PageResult` 데이터와 병합 PDF 갱신은 선택 여부와 무관하게 항상 수행한다.
         화면(미리보기/검수 패널) 갱신만 요청 당시 페이지가 지금도 선택돼 있을 때로
@@ -1217,6 +1441,7 @@ class MainWindow(QMainWindow):
         new_result.crop_rect = crop_rect
         new_result.rotation_degrees = rotation_degrees
         new_result.type_override = type_override
+        new_result.corners = corners
         self._results_by_input[str(input_path.resolve())] = new_result
 
         rebuild_error: str | None = None

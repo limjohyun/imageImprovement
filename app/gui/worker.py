@@ -114,6 +114,21 @@ class PageResult:
     자동 분류를 그대로 썼으면 None. `crop_rect`/`rotation_degrees`와 마찬가지로
     다음 재처리 요청에서도 이전 선택을 이어가기 위해 보관한다."""
 
+    corners: np.ndarray | None = None
+    """PRE-1(GUI 수동 오버라이드): 사용자가 원근 보정 4모서리 좌표를 직접 지정했으면
+    그 값(shape (4, 2)), 자동 검출을 그대로 썼으면 None. `crop_rect`/`rotation_degrees`/
+    `type_override`와 마찬가지로 다음 재처리 요청(자르기/회전, 문서 유형 변경 등)에서도
+    이전에 지정한 수동 코너가 조용히 사라지지 않도록 보관한다. `process_page_image()`는
+    이 값을 채우지 않는다(자르기/회전과 마찬가지로 호출부인 `MainWindow`가 재처리 완료
+    후 원래 요청에 쓰인 값을 그대로 다시 기록한다).
+
+    한계: 이 좌표는 그것이 지정됐던 당시 이미지 크기 기준이다. 이후 자르기/회전으로
+    이미지 크기가 달라지면 더 이상 유효하지 않으므로(범위 밖 좌표로 원근 변환하면
+    `cv2.warpPerspective`가 예외 없이 대부분 검은색인 손상된 이미지를 만들어낸다),
+    `MainWindow._preprocess_config_for_corners()`가 재처리 시점의 실제 이미지 크기와
+    비교해 범위를 벗어나면 이 값을 폐기하고 자동 검출로 되돌린다 — 이 경우 이
+    필드는 다음 `PageResult`에 `None`으로 다시 기록된다."""
+
 
 def process_page_image(
     image: np.ndarray,
