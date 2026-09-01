@@ -48,7 +48,7 @@
 | 1 | 수동 보정 (자르기/회전) | GUI-3(일부) | Phase2#5, Phase3#5 | `851d5923` | ✅ 완료 |
 | 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ✅ 완료 |
 | 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ✅ 완료 |
-| 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ⬜ 대기 |
+| 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ✅ 완료(부분 범위 축소) |
 | 5 | Phase4 End-to-End 검증 (혼합 워크플로우) | §9 Phase4 | #4 | `1abca8b7` | ⬜ 대기 |
 
 ## Phase 5 — 선택적 클라우드 백업 (낮은 우선순위)
@@ -240,6 +240,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `python-dev-expert`가 수정: 세 호출부 모두 `_refresh_list_editing_controls()` 호출을 `worker.start()` **이후**로 이동. `_start_processing()`을 실제로 호출해 `.start()` 직후 시점의 드래그·삭제 가드 상태를 검증하는 통합 회귀 테스트(`test_start_processing_disables_editing_immediately_after_start`) 신규 추가(수정 전 순서로는 실패함을 확인).
 - 진행 중 발견된 별개 환경 이슈(코드 결함 아님, 이번 범위 밖): `synthetic_score_photo` fixture가 부르는 `mscore` 서브프로세스 호출이 시스템 부하가 높을 때(동시에 여러 pytest 프로세스가 돌 때) `timeout` 이후 자식은 죽지만 손자(MuseScore GUI 앱 본체)가 파이프 fd를 물고 있어 `subprocess.run`의 `communicate()`가 무한 대기하는 것으로 추정되는 hang을 관찰함 — `tests/fixtures/synthetic.py` 관련, 이번 커밋 범위 밖이라 손대지 않고 기록만 남김.
 - 최종 검증: 신규/관련 회귀 테스트 `tests/gui/test_page_reorder_delete.py` 13개 전부 통과. `tests/gui/` 전체(위 환경 이슈로 느린 악보 E2E 3개 제외) 52 passed. `ruff check .` → 통과.
+
+### ✅ Phase4-4: 유형 자동 라우팅 정교화 — 완료(부분 범위 축소)
+
+- Phase2-1에서 알려진 한계로 남겨뒀던 오탐 시나리오 3건 중 2건을 `python-dev-expert`가 수정: (1) 줄무늬 배경(커튼/벽지 등 등간격 평행선) → SCORE 오탐은 오선 후보 대역 안에 음표머리 등 "선이 아닌" 내용이 실제로 있는지 확인하는 `_has_non_line_content_near`로 해결, (2) 텍스트 라벨 없는 단일 대형 도형 → TEXT 오탐은 큰 컴포넌트가 정확히 하나뿐이고 글자 크기 컴포넌트가 전혀 없을 때만 예외적으로 DIAGRAM으로 판정하는 엄격한 조건을 추가해 해결. 두 수정 모두 `code-reviewer` 검토 통과(회귀 없음).
+- 세 번째 남은 오탐(표/격자 문서 → DIAGRAM)은 두 차례 재설계했으나 모두 새 HIGH급 회귀가 발견되어 **이번 Phase 범위에서 제외하기로 결정**(사용자 확인): 1차(큰 컴포넌트 면적의 변동계수로 "표 셀 vs 반복 도형" 구분)는 실사진 지터에 취약해 표를 다시 DIAGRAM으로 오분류, 셀 4개 미만 소형 표는 검사 자체를 건너뜀, 균일 크기 반복 도형 4개 이상이 새로 TEXT로 오분류되는 반대 방향 회귀까지 3건의 HIGH가 나옴. 2차(`cv2.HoughLinesP`로 실제 격자선 존재 여부를 직접 검출)는 1차의 3가지 반례를 모두 해결했지만, 원근보정 후 잔여 기울기(6도 이상)에서 각도 임계값을 못 만족해 원래 버그가 재발하는 문제와 PRD가 명시하는 흔한 도형 레이아웃(2×2 사분면, 나란히 붙은 플로우차트 박스)이 표로 오판정되는 새 HIGH 2건이 나옴 — 순수 기하학적 휴리스틱으로는 "표 vs 격자형 배치 도형" 구분이 이 프로젝트 규모에서 수렴하지 않는다고 판단해 재설계 중단.
+- RT-1 요구사항 자체가 "자동 추정 + 수동 오버라이드"이므로, 표→DIAGRAM 오탐은 이미 구현된 수동 오버라이드 UI(GUI에서 문서 유형을 직접 지정하는 콤보박스 + 적용 버튼, `type_override`를 `process_page_image`/`ReprocessWorker`까지 관통시킴)로 구제 가능한 **알려진 한계**로 문서화하고 넘어간다.
+- 수동 오버라이드 UI(`app/gui/main_window.py`, `app/gui/worker.py`)는 `code-reviewer` 검토 통과(워커 경합·좌표계 문제 없음 확인) — 자르기/회전(Phase4-1)과 동일하게 재처리(`ReprocessWorker`) 경로에서만 적용되며, 최초 배치 처리(`ProcessingWorker`)는 계속 자동 분류만 사용.
+- 최종 검증: `tests/router/test_classifier.py`, `tests/gui/test_crop_rotate_guards.py`, `tests/gui/test_worker_routing.py` 전부 통과. `ruff check .` → 통과.
 
 ## 다음 진행 방식
 

@@ -75,20 +75,20 @@ def test_crop_rotate_button_disabled_while_batch_processing(qtbot, tmp_path):
     _add_page_with_result(window, result)
 
     # 처리된 결과가 있으면 평소엔 활성화돼야 한다.
-    window._refresh_crop_rotate_panel(image_path)
+    window._refresh_manual_correction_controls(image_path)
     assert window.crop_rotate_button.isEnabled() is True
 
     batch_thread = _start_blocking_thread(qtbot)
     try:
         window._worker = batch_thread
-        window._refresh_crop_rotate_panel(image_path)
+        window._refresh_manual_correction_controls(image_path)
         assert window.crop_rotate_button.isEnabled() is False
         assert window._is_batch_processing() is True
     finally:
         _stop_blocking_thread(batch_thread)
         window._worker = None
 
-    window._refresh_crop_rotate_panel(image_path)
+    window._refresh_manual_correction_controls(image_path)
     assert window.crop_rotate_button.isEnabled() is True
 
 
@@ -108,14 +108,14 @@ def test_crop_rotate_button_disabled_while_reprocessing(qtbot, tmp_path):
     reprocess_thread = _start_blocking_thread(qtbot)
     try:
         window._reprocess_worker = reprocess_thread
-        window._refresh_crop_rotate_panel(image_path)
+        window._refresh_manual_correction_controls(image_path)
         assert window.crop_rotate_button.isEnabled() is False
         assert window._is_reprocessing() is True
     finally:
         _stop_blocking_thread(reprocess_thread)
         window._reprocess_worker = None
 
-    window._refresh_crop_rotate_panel(image_path)
+    window._refresh_manual_correction_controls(image_path)
     assert window.crop_rotate_button.isEnabled() is True
 
 
@@ -191,7 +191,7 @@ def test_reprocess_finished_toctou_does_not_clobber_newer_worker_reference(qtbot
         input_path=image_path, page_pdf_path=stale_pdf_path, text="예전 재처리 결과"
     )
 
-    window._on_reprocess_finished(old_worker, image_path, 0, None)
+    window._on_reprocess_finished(old_worker, image_path, 0, None, None)
 
     # 예전 워커의 콜백이 새 워커의 참조를 지우면 안 된다.
     assert window._reprocess_worker is new_worker

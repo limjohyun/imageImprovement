@@ -8,10 +8,9 @@ Ghostscript 서브프로세스 호출, vtracer, oemer/MuseScore 등)이므로 GU
 별도 스레드에서 실행한다.
 
 `ProcessingWorker`는 이미지 목록을 순회하며 각 페이지를 자동 분류(`DocumentType`)한
-뒤 알맞은 처리기(텍스트/도형/악보)로 위임한다 — 수동 오버라이드 UI는 Phase4-4로 미룬
-범위 밖이므로 항상 자동 분류(`override=None`)만 사용한다. `VectorizeWorker`는
-이미 도형으로 처리된 페이지 한 장에 대해 사용자가 명시적으로 "SVG로 벡터화"를
-요청했을 때만 별도로 실행되는 훨씬 가벼운 워커다(DIA-2).
+뒤 알맞은 처리기(텍스트/도형/악보)로 위임한다(최초 배치 처리는 항상 자동 분류).
+`VectorizeWorker`는 이미 도형으로 처리된 페이지 한 장에 대해 사용자가 명시적으로
+"SVG로 벡터화"를 요청했을 때만 별도로 실행되는 훨씬 가벼운 워커다(DIA-2).
 
 악보 페이지의 오류 검수(SCR-3, "MuseScore에서 열기")는 `subprocess.Popen`으로 이미
 비블로킹이라 `VectorizeWorker` 같은 별도 QThread가 필요 없다 — 호출부(`MainWindow`)가
@@ -39,6 +38,13 @@ PRE-1~5 전처리를 거친 결과물이 아니라 원본 raw 사진에 적용�
 raw 이미지를 읽어 `app.preprocess.manual_correction.apply_manual_correction`으로
 자르기/회전까지 마친 배열을 만든 뒤 `ReprocessWorker`에 넘기면, 그 지점부터
 `process_page_image()`로 파이프라인 전체를 다시 태운다.
+
+Phase4-4(RT-1,2 고도화): `process_page_image()`와 `ReprocessWorker`에 `type_override`
+키워드 인자를 추가해, GUI에서 사용자가 문서 유형을 수동으로 지정했을 때(RT-1의
+"수동 오버라이드") `classify_document_type(..., override=type_override)`로 그대로
+전달한다. `ProcessingWorker`(최초 배치 처리)는 계속 자동 분류만 사용하고, 수동
+오버라이드는 이미 한 번 처리된 페이지를 다시 처리하는 `ReprocessWorker` 경로에서만
+쓰인다 — 자르기/회전(Phase4-1)과 동일한 "재처리" 개념이기 때문이다.
 """
 
 from __future__ import annotations
@@ -103,6 +109,11 @@ class PageResult:
     rotation_degrees: int = 0
     """Phase4-1(GUI-3): 사용자가 지정한 회전 각도(90도 단위, 0/90/180/270)."""
 
+    type_override: DocumentType | None = None
+    """Phase4-4(RT-1 수동 오버라이드): 사용자가 문서 유형을 직접 지정했으면 그 값,
+    자동 분류를 그대로 썼으면 None. `crop_rect`/`rotation_degrees`와 마찬가지로
+    다음 재처리 요청에서도 이전 선택을 이어가기 위해 보관한다."""
+
 
 def process_page_image(
     image: np.ndarray,
@@ -111,6 +122,7 @@ def process_page_image(
     *,
     lang_kwargs: dict[str, str] | None = None,
     preprocess_config: PreprocessConfig | None = None,
+    type_override: DocumentType | None = None,
 ) -> PageResult:
     """이미지 한 장을 (공통 전처리 → 자동 분류 → 위임 → `PageResult` 변환)까지 처리한다.
 
@@ -124,11 +136,15 @@ def process_page_image(
     먼저 한 번만 수행하고 그 결과를 넘긴다(이중 전처리 방지). 분류는 여기서 먼저
     한 번 수행해(`classify_document_type`) 그 결과에 따라 텍스트 처리기 전용
     옵션(`lang`)이 도형/악보 처리기에 잘못 전달되지 않게 한다.
+
+    `type_override`(Phase4-4, RT-1 수동 오버라이드): GUI에서 사용자가 문서 유형을
+    직접 지정했을 때 자동 분류를 건너뛰고 그 유형을 그대로 쓴다. `None`이면 기존과
+    동일하게 자동 분류(`classify_document_type`)에 맡긴다.
     """
     lang_kwargs = lang_kwargs or {}
     preprocessed = run_pipeline(image, preprocess_config)
 
-    document_type = classify_document_type(preprocessed)
+    document_type = classify_document_type(preprocessed, override=type_override)
     extra_kwargs = lang_kwargs if document_type == DocumentType.TEXT else {}
     result = route_and_process(preprocessed, page_pdf_path, override=document_type, **extra_kwargs)
 
@@ -299,6 +315,10 @@ class ReprocessWorker(QThread):
     결과) — 이 워커는 그 지점부터 `process_page_image()`(전처리→분류→라우팅)를
     다시 태우기만 한다. 업스케일(Real-ESRGAN)을 포함한 무거운 연산이므로
     `VectorizeWorker`와 같은 이유로 별도 QThread에서 실행한다.
+
+    Phase4-4(RT-1 수동 오버라이드): `type_override`가 주어지면 자르기/회전과
+    마찬가지로 사용자가 문서 유형을 직접 지정한 것이므로 재처리에도 그대로
+    반영한다(`None`이면 기존과 동일하게 자동 분류).
     """
 
     error_occurred = Signal(str)
@@ -312,6 +332,7 @@ class ReprocessWorker(QThread):
         *,
         lang: str | None = None,
         preprocess_config: PreprocessConfig | None = None,
+        type_override: DocumentType | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -320,6 +341,7 @@ class ReprocessWorker(QThread):
         self.page_pdf_path = Path(page_pdf_path)
         self._lang_kwargs = {"lang": lang} if lang else {}
         self._preprocess_config = preprocess_config
+        self._type_override = type_override
         self.page_result: PageResult | None = None
 
     def run(self) -> None:
@@ -330,6 +352,7 @@ class ReprocessWorker(QThread):
                 self.page_pdf_path,
                 lang_kwargs=self._lang_kwargs,
                 preprocess_config=self._preprocess_config,
+                type_override=self._type_override,
             )
         except Exception as exc:  # noqa: BLE001 - 파이프라인 전체(전처리~라우팅) 재실행 경계
             logger.exception("페이지 재처리 중 오류가 발생했습니다: %s", self.input_path)

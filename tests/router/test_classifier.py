@@ -48,6 +48,45 @@ def test_classify_staff_line_image_as_score() -> None:
     assert document_type is DocumentType.SCORE
 
 
+# ---------------------------------------------------------------------------
+# Phase4-4(RT-1,2 고도화): Phase2-1 리뷰에서 알려진 한계로 남겨뒀던 오탐
+# 시나리오 중 검증된 두 가지에 대한 회귀 테스트. (표→DIAGRAM 오탐 수정은 두 차례
+# 재설계 모두 code-reviewer가 새 HIGH급 회귀를 발견해 Phase4-4 범위에서 제외 —
+# 자세한 경위는 `docs/roadmap.md` Phase4-4 완료 기록 참고.)
+# ---------------------------------------------------------------------------
+
+
+def _make_single_large_shape_image(width: int = 1000, height: int = 1300) -> np.ndarray:
+    """텍스트 라벨 없이 큰 원 하나만 그린 합성 도형 이미지."""
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    cv2.circle(image, (width // 2, height // 2), 300, (0, 0, 0), 5)
+    return image
+
+
+def _make_striped_background_image(
+    width: int = 1000, height: int = 1300, count: int = 10
+) -> np.ndarray:
+    """음표/기호 없이 등간격 가로줄만 있는 합성 줄무늬 배경 이미지(커튼/벽지 등을 흉내)."""
+    image = np.full((height, width, 3), 255, dtype=np.uint8)
+    gap = height // count
+    for i in range(count):
+        y = i * gap + gap // 2
+        cv2.line(image, (0, y), (width, y), (0, 0, 0), 4)
+    return image
+
+
+def test_classify_striped_background_not_as_score() -> None:
+    """등간격 줄무늬만 있고 음표머리 등 다른 내용이 없으면 오선(SCORE)이 아니다."""
+    document_type = classify_document_type(_make_striped_background_image())
+    assert document_type is not DocumentType.SCORE
+
+
+def test_classify_single_large_shape_without_text_as_diagram() -> None:
+    """텍스트 라벨 없는 단일 대형 도형은 기본값(TEXT)이 아니라 DIAGRAM으로 판정해야 한다."""
+    document_type = classify_document_type(_make_single_large_shape_image())
+    assert document_type is DocumentType.DIAGRAM
+
+
 @pytest.mark.parametrize("override", list(DocumentType))
 def test_manual_override_bypasses_heuristic(
     synthetic_text_photo: SyntheticPhoto, override: DocumentType

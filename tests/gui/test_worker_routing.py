@@ -100,7 +100,8 @@ def test_processing_worker_merges_successful_pages_when_one_page_misclassified_a
 
     classifications = iter([DocumentType.DIAGRAM, DocumentType.SCORE])
     monkeypatch.setattr(
-        "app.gui.worker.classify_document_type", lambda image: next(classifications)
+        "app.gui.worker.classify_document_type",
+        lambda image, override=None: next(classifications),
     )
 
     worker = ProcessingWorker([image_path_1, image_path_2], work_dir)
@@ -142,7 +143,8 @@ def test_processing_worker_fills_musicxml_path_for_score_page(
     work_dir = tmp_path / "work"
 
     monkeypatch.setattr(
-        "app.gui.worker.classify_document_type", lambda image: DocumentType.SCORE
+        "app.gui.worker.classify_document_type",
+        lambda image, override=None: DocumentType.SCORE,
     )
 
     def fake_score_process_image(image, output_pdf, **kwargs):

@@ -76,6 +76,21 @@ Phase4-3(PDF-2, 페이지 재정렬/삭제): `file_list_widget`에
 드래그 자체를 비활성화(`NoDragDrop`)해 둔다 — 이 토글은 `_refresh_list_editing_
 controls()`가 워커 시작/종료 지점마다(배치/벡터화/재처리 시작 및 완료·실패 콜백)
 공통으로 호출해 갱신한다.
+
+Phase4-4(RT-1 수동 오버라이드): 자르기/회전 그룹박스 바로 아래에 "문서 유형"
+그룹박스(콤보박스 "자동"/"텍스트"/"도형"/"악보" + "적용" 버튼)를 추가한다. 자르기/
+회전과 마찬가지로 문서 유형과 무관하게 이미 처리된 모든 페이지에서 쓸 수 있는
+공통 보정이므로 같은 위치(review_stack 밖, `_build_body`의 공통 영역)에 둔다.
+"적용"을 누르면 `_on_crop_rotate_clicked`와 동일한 패턴으로 원본 raw 이미지를 다시
+읽어 그 페이지에 이미 저장된 `PageResult.crop_rect`/`rotation_degrees`를 그대로
+`apply_manual_correction`으로 적용한 뒤(자르기/회전 보정이 사라지지 않게), 선택한
+유형을 `type_override`로 넘겨 `ReprocessWorker`를 실행한다. 반대 방향도 대칭적으로
+지켜진다 — `_on_crop_rotate_clicked`도 `PageResult.type_override`를 함께 넘겨,
+자르기/회전만 다시 조정해도 이전에 지정해 둔 문서 유형이 조용히 자동으로 되돌아가지
+않게 한다. 원래 `_refresh_crop_rotate_panel`이던 "결과 있음 + 배치 미실행 + 재처리
+미실행" 조건 갱신 메서드를 `_refresh_manual_correction_controls`로 이름을 바꾸고
+자르기/회전 버튼뿐 아니라 문서 유형 콤보박스/적용 버튼도 함께 갱신하도록 확장했다
+(둘 다 "문서 유형과 무관한 공통 보정"이라는 같은 활성화 조건을 공유하기 때문).
 """
 
 from __future__ import annotations
@@ -92,6 +107,7 @@ from PySide6.QtCore import QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QCloseEvent, QImage, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QFileDialog,
     QGroupBox,
@@ -220,6 +236,7 @@ class MainWindow(QMainWindow):
 
         right_column = QVBoxLayout()
         right_column.addWidget(self._build_crop_rotate_group())
+        right_column.addWidget(self._build_type_override_group())
         right_column.addWidget(self._build_review_stack(), stretch=1)
         layout.addLayout(right_column, stretch=1)
 
@@ -295,6 +312,29 @@ class MainWindow(QMainWindow):
         button.clicked.connect(self._on_crop_rotate_clicked)
         group_layout.addWidget(button)
         self.crop_rotate_button = button
+
+        return group
+
+    def _build_type_override_group(self) -> QGroupBox:
+        """Phase4-4(RT-1 수동 오버라이드): 문서 유형과 무관하게 모든 처리된 페이지에서
+        자동 분류 결과를 사람이 직접 바로잡을 수 있는 콤보박스 + 적용 버튼."""
+        group = QGroupBox("문서 유형")
+        group_layout = QHBoxLayout(group)
+
+        combo = QComboBox()
+        combo.addItem("자동", None)
+        combo.addItem("텍스트", DocumentType.TEXT)
+        combo.addItem("도형", DocumentType.DIAGRAM)
+        combo.addItem("악보", DocumentType.SCORE)
+        combo.setEnabled(False)
+        group_layout.addWidget(combo, stretch=1)
+        self.type_override_combo = combo
+
+        apply_button = QPushButton("적용")
+        apply_button.setEnabled(False)
+        apply_button.clicked.connect(self._on_type_override_apply_clicked)
+        group_layout.addWidget(apply_button)
+        self.type_override_apply_button = apply_button
 
         return group
 
@@ -562,13 +602,13 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText("처리에 실패했습니다.")
         self._worker = None
-        # HIGH #1(code-reviewer 지적): 배치 처리 중에는 `_refresh_crop_rotate_panel`이
+        # HIGH #1(code-reviewer 지적): 배치 처리 중에는 `_refresh_manual_correction_controls`이
         # 자르기/회전 버튼을 계속 비활성 상태로 둔다(`_is_batch_processing()`이 True).
         # 배치가 끝난 지금 시점에 다시 계산해줘야 현재 선택된 페이지의 버튼이
         # 정상적으로 활성화된다. 재정렬/삭제 가능 여부(Phase4-3)도 같은 이유로 갱신한다.
         items = self.file_list_widget.selectedItems()
         if items:
-            self._refresh_crop_rotate_panel(Path(items[0].data(_PATH_ROLE)))
+            self._refresh_manual_correction_controls(Path(items[0].data(_PATH_ROLE)))
         self._refresh_list_editing_controls()
         self.processing_completed.emit()
 
@@ -585,7 +625,7 @@ class MainWindow(QMainWindow):
         self._show_original_preview(path)
         self._refresh_processed_preview(path)
         self._refresh_type_review_panels(path)
-        self._refresh_crop_rotate_panel(path)
+        self._refresh_manual_correction_controls(path)
 
     def _refresh_preview_if_selected(self, input_path: Path) -> None:
         items = self.file_list_widget.selectedItems()
@@ -595,7 +635,7 @@ class MainWindow(QMainWindow):
         if selected_path.resolve() == input_path.resolve():
             self._refresh_processed_preview(selected_path)
             self._refresh_type_review_panels(selected_path)
-            self._refresh_crop_rotate_panel(selected_path)
+            self._refresh_manual_correction_controls(selected_path)
 
     def _show_original_preview(self, path: Path) -> None:
         pixmap = QPixmap(str(path))
@@ -716,9 +756,10 @@ class MainWindow(QMainWindow):
         else:
             self.review_stack.setCurrentWidget(self._text_review_page)
 
-    def _refresh_crop_rotate_panel(self, path: Path) -> None:
-        """Phase4-1(GUI-3 일부): 선택된 페이지가 이미 처리된 경우에만 자르기/회전
-        버튼을 활성화한다. 문서 유형과 무관하게 모든 유형에서 동작하는 범용 기능이다.
+    def _refresh_manual_correction_controls(self, path: Path) -> None:
+        """Phase4-1(GUI-3 일부)+Phase4-4(RT-1 수동 오버라이드): 선택된 페이지가 이미
+        처리된 경우에만 자르기/회전 버튼과 문서 유형 콤보박스/적용 버튼을 활성화한다.
+        문서 유형과 무관하게 모든 유형에서 동작하는 범용 기능이다.
 
         code-reviewer HIGH #1 지적: 결과가 있어도 전체 배치 처리(`ProcessingWorker`)가
         아직 실행 중이면 비활성화한다 — 그렇지 않으면 배치가 `merged.pdf`를 쓰는
@@ -726,6 +767,11 @@ class MainWindow(QMainWindow):
         경합이 생길 수 있다. 재처리(`ReprocessWorker`)가 이미 실행 중일 때도
         마찬가지로 비활성화한다 — 지연된(TOCTOU) `finished` 콜백이 이 메서드를
         불러도 실제로 재처리가 끝나지 않았다면 버튼이 다시 켜지면 안 된다.
+
+        문서 유형 콤보박스는 그 페이지에 저장된 `PageResult.type_override`(있으면
+        직전에 사용자가 지정한 값, 없으면 "자동")로 현재 선택을 맞춰 보여준다 —
+        `setCurrentIndex`가 다시 `_on_type_override_apply_clicked`를 부르지 않도록
+        시그널을 잠깐 막는다(값을 보여주기만 할 뿐 적용을 트리거하면 안 된다).
         """
         result = self._results_by_input.get(str(path.resolve()))
         can_reprocess = (
@@ -733,12 +779,19 @@ class MainWindow(QMainWindow):
         )
         self.crop_rotate_button.setEnabled(can_reprocess)
 
+        self.type_override_apply_button.setEnabled(can_reprocess)
+        with QSignalBlocker(self.type_override_combo):
+            self.type_override_combo.setEnabled(can_reprocess)
+            override = result.type_override if result is not None else None
+            index = self.type_override_combo.findData(override)
+            self.type_override_combo.setCurrentIndex(max(index, 0))
+
     def _reset_text_review_panel(self) -> None:
         """새 배치 처리를 시작하거나(Phase1) 페이지를 삭제했을 때(Phase4-3) 검수/
         벡터화/악보 검수/자르기·회전 패널을 초기화한다.
 
         현재 선택된 페이지가 있으면 `_refresh_text_review`/`_refresh_diagram_panel`/
-        `_refresh_score_panel`/`_refresh_crop_rotate_panel`로 위임해 "아직 처리되지
+        `_refresh_score_panel`/`_refresh_manual_correction_controls`로 위임해 "아직 처리되지
         않았습니다" 상태를 보여주고(선택은 유지되므로 이쪽이 더 정확한 문구다),
         선택된 페이지가 없으면(페이지 삭제 직후에는 항상 이 경우다) 안내 문구만
         되돌린다.
@@ -747,7 +800,7 @@ class MainWindow(QMainWindow):
         if items:
             path = Path(items[0].data(_PATH_ROLE))
             self._refresh_type_review_panels(path)
-            self._refresh_crop_rotate_panel(path)
+            self._refresh_manual_correction_controls(path)
             return
         self._reviewed_input_path = None
         with QSignalBlocker(self.text_review_edit):
@@ -758,6 +811,10 @@ class MainWindow(QMainWindow):
         self.vectorization_disclaimer_label.setText("")
         self.open_in_musescore_button.setEnabled(False)
         self.crop_rotate_button.setEnabled(False)
+        self.type_override_apply_button.setEnabled(False)
+        with QSignalBlocker(self.type_override_combo):
+            self.type_override_combo.setEnabled(False)
+            self.type_override_combo.setCurrentIndex(0)
         self._show_review_page_for(None)
 
     def _on_review_text_changed(self) -> None:
@@ -965,10 +1022,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "보정 실패", str(exc))
             return
 
-        self.crop_rotate_button.setEnabled(False)
+        # Phase4-4: 자르기/회전만 다시 조정하는 요청이므로, 이 페이지에 이미 지정된
+        # 문서 유형 오버라이드(있다면)는 그대로 이어간다 — 유형은 그대로 두고 자르기/
+        # 회전만 바꿨는데 유형이 조용히 자동으로 되돌아가면 안 된다.
+        type_override = result.type_override
+        self._disable_manual_correction_controls()
         self.status_label.setText(f"보정을 반영해 다시 처리하는 중: {path.name}")
 
-        worker = ReprocessWorker(corrected_image, path, result.page_pdf_path)
+        worker = ReprocessWorker(
+            corrected_image, path, result.page_pdf_path, type_override=type_override
+        )
         # MEDIUM #3(code-reviewer 지적): `finished`/`error_occurred`가 GUI 스레드에서
         # 실제로 처리되기까지는 좁은 시간차가 있다. 그 사이 사용자가 같은 페이지를
         # 다시 열어 새 `ReprocessWorker`를 시작하면 `self._reprocess_worker`가 이미
@@ -978,7 +1041,85 @@ class MainWindow(QMainWindow):
             lambda message, w=worker, p=path: self._on_reprocess_error(w, message, p)
         )
         worker.finished.connect(
-            lambda w=worker: self._on_reprocess_finished(w, path, rotation_degrees, crop_rect)
+            lambda w=worker: self._on_reprocess_finished(
+                w, path, rotation_degrees, crop_rect, type_override
+            )
+        )
+        self._reprocess_worker = worker
+        # code-reviewer HIGH 지적: start() 호출 전에는 isRunning()이 항상 False이므로
+        # 반드시 start() 이후에 갱신해야 한다.
+        worker.start()
+        self._refresh_list_editing_controls()
+
+    def _disable_manual_correction_controls(self) -> None:
+        """재처리를 시작하는 순간 자르기/회전 버튼과 문서 유형 컨트롤을 모두 잠근다.
+
+        재처리 진행 중에는 어느 쪽으로 다시 클릭해도 같은 페이지에 대한 두 번째
+        `ReprocessWorker`가 겹쳐 시작되면 안 되므로, 두 진입점(`_on_crop_rotate_
+        clicked`/`_on_type_override_apply_clicked`)이 공통으로 호출한다.
+        """
+        self.crop_rotate_button.setEnabled(False)
+        self.type_override_apply_button.setEnabled(False)
+        self.type_override_combo.setEnabled(False)
+
+    def _on_type_override_apply_clicked(self) -> None:
+        """RT-1 수동 오버라이드: 선택된 페이지의 문서 유형을 사용자가 고른 값으로
+        강제 지정해 다시 처리한다.
+
+        `_on_crop_rotate_clicked`와 같은 패턴을 쓰되, 자르기/회전 다이얼로그를 새로
+        열지 않고 그 페이지에 이미 저장돼 있던 `crop_rect`/`rotation_degrees`를
+        그대로 다시 적용한다 — 유형만 바꾸는 요청인데 기존 자르기/회전 보정이
+        사라지면 안 되기 때문이다.
+        """
+        items = self.file_list_widget.selectedItems()
+        if not items:
+            return
+        path = Path(items[0].data(_PATH_ROLE))
+        result = self._results_by_input.get(str(path.resolve()))
+        if result is None or self._work_dir is None:
+            return
+        if self._is_batch_processing():
+            QMessageBox.warning(
+                self, "처리 중", "전체 배치 처리가 진행 중입니다. 완료 후 다시 시도하세요."
+            )
+            return
+        if self._is_reprocessing():
+            QMessageBox.warning(self, "재처리 진행 중", "이미 재처리가 진행 중입니다.")
+            return
+
+        raw_image = cv2.imread(str(path))
+        if raw_image is None:
+            QMessageBox.critical(
+                self, "이미지 읽기 실패", f"원본 이미지를 읽을 수 없습니다: {path}"
+            )
+            return
+
+        rotation_degrees = result.rotation_degrees
+        crop_rect = result.crop_rect
+        try:
+            corrected_image = apply_manual_correction(
+                raw_image, rotation_degrees=rotation_degrees, crop_rect=crop_rect
+            )
+        except ValueError as exc:
+            QMessageBox.critical(self, "보정 실패", str(exc))
+            return
+
+        type_override: DocumentType | None = self.type_override_combo.currentData()
+        self._disable_manual_correction_controls()
+        self.status_label.setText(f"문서 유형을 다시 지정해 처리하는 중: {path.name}")
+
+        worker = ReprocessWorker(
+            corrected_image, path, result.page_pdf_path, type_override=type_override
+        )
+        # `_on_crop_rotate_clicked`와 동일한 이유(MEDIUM #3)로 워커 인스턴스를 클로저로
+        # 고정해 넘긴다.
+        worker.error_occurred.connect(
+            lambda message, w=worker, p=path: self._on_reprocess_error(w, message, p)
+        )
+        worker.finished.connect(
+            lambda w=worker: self._on_reprocess_finished(
+                w, path, rotation_degrees, crop_rect, type_override
+            )
         )
         self._reprocess_worker = worker
         # code-reviewer HIGH 지적: start() 호출 전에는 isRunning()이 항상 False이므로
@@ -1000,7 +1141,7 @@ class MainWindow(QMainWindow):
             self._reprocess_worker = None
         self._refresh_list_editing_controls()
         if self._is_currently_selected(input_path):
-            self._refresh_crop_rotate_panel(input_path)
+            self._refresh_manual_correction_controls(input_path)
             QMessageBox.critical(self, "재처리 오류", message)
         else:
             self.status_label.setText(f"재처리 실패: {input_path.name}: {message}")
@@ -1010,7 +1151,8 @@ class MainWindow(QMainWindow):
         worker: ReprocessWorker,
         input_path: Path,
         rotation_degrees: int,
-        crop_rect: tuple[int, int, int, int],
+        crop_rect: tuple[int, int, int, int] | None,
+        type_override: DocumentType | None,
     ) -> None:
         """재처리가 끝나면 `PageResult`를 갱신하고 최종 병합 PDF를 다시 만든다.
 
@@ -1024,7 +1166,7 @@ class MainWindow(QMainWindow):
         않으면(사용자가 그 사이 같은 페이지를 다시 열어 새 재처리를 시작한
         경우) 예전 워커의 뒤늦은 `finished`가 새 워커의 참조를 지우거나, 아직
         진행 중인 새 재처리를 "끝났다"고 오인해 버튼을 잘못 다시 활성화시킬 수
-        있다(`_refresh_crop_rotate_panel`이 `_is_reprocessing()`도 함께 확인하므로
+        있다(`_refresh_manual_correction_controls`이 `_is_reprocessing()`도 함께 확인하므로
         버튼 자체는 이중으로 보호되지만, 참조 정리는 별도로 지켜야 한다).
         """
         if self._reprocess_worker is worker:
@@ -1033,12 +1175,13 @@ class MainWindow(QMainWindow):
         if worker.page_result is None:
             # 실패 시 `_on_reprocess_error`가 이미 메시지를 보여줬으므로 버튼 상태만 정리한다.
             if self._is_currently_selected(input_path):
-                self._refresh_crop_rotate_panel(input_path)
+                self._refresh_manual_correction_controls(input_path)
             return
 
         new_result = worker.page_result
         new_result.crop_rect = crop_rect
         new_result.rotation_degrees = rotation_degrees
+        new_result.type_override = type_override
         self._results_by_input[str(input_path.resolve())] = new_result
 
         rebuild_error: str | None = None
@@ -1052,7 +1195,7 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"보정을 반영해 다시 처리했습니다: {input_path.name}")
             return
 
-        self._refresh_crop_rotate_panel(input_path)
+        self._refresh_manual_correction_controls(input_path)
         self._refresh_processed_preview(input_path)
         self._refresh_type_review_panels(input_path)
         self.status_label.setText(f"보정을 반영해 다시 처리했습니다: {input_path.name}")
