@@ -49,7 +49,7 @@
 | 2 | 도형/악보 검수 위젯 통합 | GUI-3(전체) | #1 | `32dc96c8` | ✅ 완료 |
 | 3 | 페이지 재정렬/삭제 | PDF-2 | #2 | `6a46cdf1` | ✅ 완료 |
 | 4 | 유형 자동 라우팅 정교화 | RT-1,2(고도화) | #3 | `9d32a092` | ✅ 완료(부분 범위 축소) |
-| 5 | Phase4 End-to-End 검증 (혼합 워크플로우) | §9 Phase4 | #4 | `1abca8b7` | ⬜ 대기 |
+| 5 | Phase4 End-to-End 검증 (혼합 워크플로우) | §9 Phase4 | #4 | `1abca8b7` | ✅ 완료 |
 
 ## Phase 5 — 선택적 클라우드 백업 (낮은 우선순위)
 
@@ -248,6 +248,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - RT-1 요구사항 자체가 "자동 추정 + 수동 오버라이드"이므로, 표→DIAGRAM 오탐은 이미 구현된 수동 오버라이드 UI(GUI에서 문서 유형을 직접 지정하는 콤보박스 + 적용 버튼, `type_override`를 `process_page_image`/`ReprocessWorker`까지 관통시킴)로 구제 가능한 **알려진 한계**로 문서화하고 넘어간다.
 - 수동 오버라이드 UI(`app/gui/main_window.py`, `app/gui/worker.py`)는 `code-reviewer` 검토 통과(워커 경합·좌표계 문제 없음 확인) — 자르기/회전(Phase4-1)과 동일하게 재처리(`ReprocessWorker`) 경로에서만 적용되며, 최초 배치 처리(`ProcessingWorker`)는 계속 자동 분류만 사용.
 - 최종 검증: `tests/router/test_classifier.py`, `tests/gui/test_crop_rotate_guards.py`, `tests/gui/test_worker_routing.py` 전부 통과. `ruff check .` → 통과.
+
+### ✅ Phase4-5: Phase4 End-to-End 검증 (혼합 워크플로우) — 완료 (Phase4 전체 완료)
+
+- `qa-test-engineer`가 `tests/gui/test_e2e_phase4.py`에 §9 Phase4 수용 기준("여러 유형이 섞인 입력 세트로 전체 워크플로우 수행")을 검증하는 테스트를 작성. Phase2-5/Phase3-5와 같은 패턴으로 실제 `MainWindow`를 통해 텍스트+도형 혼합 입력(GUI-1)→백그라운드 처리(자동 분류로 TEXT/DIAGRAM 각각 정확히 판정 확인)→문서 유형별 검수 UI 전환(GUI-3, Phase4-2)까지 잇고, 여기에 Phase4에서 새로 추가된 기능들이 실제로 맞물리는지를 이어서 검증: 도형으로 자동 분류된 페이지를 수동 오버라이드(RT-1, Phase4-4)로 TEXT로 되돌려 `ReprocessWorker`가 OCR까지 포함해 실제로 재처리하는지, 이후 첫 페이지를 삭제(PDF-2, Phase4-3)했을 때 목록/결과 캐시/병합 PDF가 올바르게 재구성되는지, 마지막으로 저장(GUI-4)된 PDF가 오버라이드+삭제를 모두 반영한 1페이지 상태인지까지 하나의 흐름으로 확인. 악보(score) 샘플은 Phase3-5와 동일한 이유(oemer 체크포인트 미설치)로 이번 혼합 시나리오에서 제외.
+- 수동 오버라이드 시나리오를 포함한 것은 Phase4-4에서 "표→DIAGRAM 오탐을 수동 오버라이드로 구제하기로" 결정한 것을 실제 GUI 흐름 끝까지(재처리 파이프라인 포함) 한 번은 검증해두기 위함.
+- 테스트 전용 변경(프로덕션 코드 수정 없음)이라 Phase2-5/Phase3-5 선례대로 별도 `code-reviewer` 단계 없이 진행. 발견된 프로덕션 결함 없음(도형 이미지를 강제로 OCR해도 Tesseract/OCRmyPDF가 예외 없이 빈 텍스트를 정상 반환하며 파이프라인이 끝까지 완주함을 확인).
+- 최종 검증: `tests/gui/test_e2e_phase4.py` → 1 passed(Tesseract/Ghostscript/qpdf가 설치된 이 머신에서 skip 없이 실제 파이프라인 전체 실행). `ruff check .` → 통과.
+- **Phase4(GUI 고도화) 전체 완료.** 다음은 Phase5(선택적 클라우드 백업, 낮은 우선순위) — 아직 시작 전.
 
 ## 다음 진행 방식
 
