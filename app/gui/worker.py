@@ -53,10 +53,10 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QThread, Signal
 
+from app.ingest import load_image_bgr
 from app.pdf_assembly.assemble import assemble_pdf
 from app.preprocess.pipeline import PreprocessConfig, run_pipeline
 from app.processors.diagram import DiagramResult
@@ -286,7 +286,7 @@ class ProcessingWorker(QThread):
 
     def _process_one(self, image_path: Path, page_pdf_path: Path) -> PageResult:
         """이미지 한 장을 파일에서 읽어 `process_page_image()`로 처리한다."""
-        image = cv2.imread(str(image_path))
+        image = load_image_bgr(image_path)
         if image is None:
             raise FileNotFoundError(f"이미지를 읽을 수 없습니다: {image_path}")
         return process_page_image(

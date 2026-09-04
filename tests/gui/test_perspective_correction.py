@@ -158,7 +158,7 @@ def test_perspective_correction_apply_starts_worker_with_manual_corners(
     _CapturingReprocessWorker.created.clear()
     monkeypatch.setattr("app.gui.main_window.ReprocessWorker", _CapturingReprocessWorker)
     monkeypatch.setattr(
-        "app.gui.main_window.cv2.imread",
+        "app.gui.main_window.load_image_bgr",
         lambda *_args, **_kwargs: np.zeros((50, 40, 3), dtype=np.uint8),
     )
 
@@ -205,7 +205,7 @@ def test_manual_corners_survive_crop_rotate_reprocess(qtbot, tmp_path, monkeypat
 
     monkeypatch.setattr(CropRotateDialog, "exec", fake_crop_rotate_exec)
     monkeypatch.setattr(
-        "app.gui.main_window.cv2.imread",
+        "app.gui.main_window.load_image_bgr",
         lambda *_args, **_kwargs: np.zeros((100, 100, 3), dtype=np.uint8),
     )
 
@@ -248,7 +248,7 @@ def test_manual_corners_discarded_when_new_crop_changes_image_size(
     # 자르기 대상 원본 이미지 자체는 여전히 100x100이지만, 이번에 지정한 자르기
     # 영역(40x40)이 이전 코너 좌표(최대 90/95)보다 작아 결과 이미지 크기가 달라진다.
     monkeypatch.setattr(
-        "app.gui.main_window.cv2.imread",
+        "app.gui.main_window.load_image_bgr",
         lambda *_args, **_kwargs: np.zeros((100, 100, 3), dtype=np.uint8),
     )
 
@@ -278,7 +278,7 @@ def test_manual_corners_survive_type_override_reprocess(qtbot, tmp_path, monkeyp
     _CapturingReprocessWorker.created.clear()
     monkeypatch.setattr("app.gui.main_window.ReprocessWorker", _CapturingReprocessWorker)
     monkeypatch.setattr(
-        "app.gui.main_window.cv2.imread",
+        "app.gui.main_window.load_image_bgr",
         lambda *_args, **_kwargs: np.zeros((100, 100, 3), dtype=np.uint8),
     )
 

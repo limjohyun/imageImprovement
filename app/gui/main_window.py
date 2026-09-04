@@ -131,7 +131,6 @@ import shutil
 import tempfile
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pymupdf
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
@@ -160,6 +159,7 @@ from app.backup.settings import BackupSettings
 from app.backup.uploader import upload_pdf
 from app.gui.crop_rotate_dialog import CropRotateDialog, PerspectiveCorrectionDialog
 from app.gui.worker import PageResult, ProcessingWorker, ReprocessWorker, VectorizeWorker
+from app.ingest import load_image_bgr
 from app.pdf_assembly.assemble import assemble_pdf
 from app.preprocess.manual_correction import apply_manual_correction
 from app.preprocess.perspective import detect_document_corners
@@ -170,7 +170,7 @@ from app.router.classifier import DocumentType
 
 logger = logging.getLogger(__name__)
 
-_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 _PATH_ROLE = Qt.ItemDataRole.UserRole
 _DIGITS_RE = re.compile(r"(\d+)")
 
@@ -470,7 +470,7 @@ class MainWindow(QMainWindow):
         self._add_image_paths(paths)
 
     def _on_select_files_clicked(self) -> None:
-        filter_str = "이미지 파일 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+        filter_str = "이미지 파일 (*.jpg *.jpeg *.png *.bmp *.tif *.tiff *.heic *.heif)"
         files, _ = QFileDialog.getOpenFileNames(self, "이미지 파일 선택", "", filter_str)
         if not files:
             return
@@ -1061,7 +1061,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "재처리 진행 중", "이미 재처리가 진행 중입니다.")
             return
 
-        raw_image = cv2.imread(str(path))
+        raw_image = load_image_bgr(path)
         if raw_image is None:
             QMessageBox.critical(
                 self, "이미지 읽기 실패", f"원본 이미지를 읽을 수 없습니다: {path}"
@@ -1212,7 +1212,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "재처리 진행 중", "이미 재처리가 진행 중입니다.")
             return
 
-        raw_image = cv2.imread(str(path))
+        raw_image = load_image_bgr(path)
         if raw_image is None:
             QMessageBox.critical(
                 self, "이미지 읽기 실패", f"원본 이미지를 읽을 수 없습니다: {path}"
@@ -1300,7 +1300,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "재처리 진행 중", "이미 재처리가 진행 중입니다.")
             return
 
-        raw_image = cv2.imread(str(path))
+        raw_image = load_image_bgr(path)
         if raw_image is None:
             QMessageBox.critical(
                 self, "이미지 읽기 실패", f"원본 이미지를 읽을 수 없습니다: {path}"

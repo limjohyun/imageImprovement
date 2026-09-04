@@ -132,7 +132,7 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 ### ✅ Phase1-5: 최소 GUI — 완료
 
 - `python-dev-expert`가 구현: `app/gui/worker.py`(`ProcessingWorker`, `QThread` 상속 — 텍스트 파이프라인(전처리+OCR+PDF 병합)을 별도 스레드에서 실행하고 진행률/페이지 결과/에러를 시그널로 전달, 커스텀 `finished`를 두지 않고 QThread 내장 시그널을 그대로 사용해 `qtbot.waitSignal(worker.finished, ...)` 패턴과 충돌 없게 함), `app/gui/main_window.py`(`MainWindow` — 폴더/파일 선택(GUI-1), 원본/처리 결과 나란히 미리보기(GUI-2, `pymupdf`로 PDF 첫 페이지 렌더링), PDF로 저장(GUI-4)), `app/gui/__init__.py`/`__main__.py`(`python -m app.gui` 진입점).
-- `code-reviewer`가 검토해 HIGH 1건 발견: 폴더 스캔이 사전식 정렬(`page1, page10, page11, page2` 순)이라 PDF-1(입력 순서대로 병합) 요구사항이 조용히 깨질 수 있던 문제 — 자연 정렬(natural sort) 키를 도입해 `_add_image_paths`가 추가할 때마다 전체 목록을 재정렬하도록 수정하고 회귀 테스트 추가. MEDIUM 3건도 함께 수정: macOS AppleDouble(`._*`) 사이드카 파일이 폴더 스캔 필터를 통과해 배치 처리가 조용히 중단되던 문제(점(`.`)으로 시작하는 파일 제외), `closeEvent` 확인 문구가 "중단"이라고 안내하면서 실제로는 처리가 끝날 때까지 기다리던 문구/동작 불일치(문구를 실제 동작에 맞게 수정), 앱 종료 시 임시 작업 디렉터리(처리된 페이지 PDF 포함)가 정리되지 않아 PACS 스캔 등 민감 문서 사본이 시스템 temp에 남던 문제(`closeEvent`에 정리 로직 추가). LOW 2건(HEIC 미지원, `lang` 파라미터 미노출)은 Phase1 범위 밖/블로킹 아님으로 판단해 보류.
+- `code-reviewer`가 검토해 HIGH 1건 발견: 폴더 스캔이 사전식 정렬(`page1, page10, page11, page2` 순)이라 PDF-1(입력 순서대로 병합) 요구사항이 조용히 깨질 수 있던 문제 — 자연 정렬(natural sort) 키를 도입해 `_add_image_paths`가 추가할 때마다 전체 목록을 재정렬하도록 수정하고 회귀 테스트 추가. MEDIUM 3건도 함께 수정: macOS AppleDouble(`._*`) 사이드카 파일이 폴더 스캔 필터를 통과해 배치 처리가 조용히 중단되던 문제(점(`.`)으로 시작하는 파일 제외), `closeEvent` 확인 문구가 "중단"이라고 안내하면서 실제로는 처리가 끝날 때까지 기다리던 문구/동작 불일치(문구를 실제 동작에 맞게 수정), 앱 종료 시 임시 작업 디렉터리(처리된 페이지 PDF 포함)가 정리되지 않아 PACS 스캔 등 민감 문서 사본이 시스템 temp에 남던 문제(`closeEvent`에 정리 로직 추가). LOW 2건(HEIC 미지원, `lang` 파라미터 미노출)은 Phase1 범위 밖/블로킹 아님으로 판단해 보류. (HEIC 미지원은 이후 `app/ingest/loader.py` 추가로 해결됨 — 아래 "HEIC/HEIF 입력 지원" 항목 참고.)
 - 최종 검증: `pytest -q` → 63 passed, 2 skipped(MuseScore 미설치, 의도된 결과). `ruff check .` → 통과.
 
 ### ✅ Phase1-6: 텍스트 검수 UI — 완료
@@ -300,6 +300,12 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - 재검토 결과 HIGH/MEDIUM 없음. 신규 회귀 테스트(`test_manual_corners_discarded_when_new_crop_changes_image_size`)로 "크기가 바뀌면 폐기, 안 바뀌면 유지"를 정확히 구분해 검증.
 - 최종 검증: `tests/gui/test_perspective_correction.py`/`test_crop_rotate_guards.py`/`test_crop_rotate_reprocess.py`/`test_worker_routing.py` → 18 passed. `ruff check .` → 통과.
 - **PRE-1 원근보정 실사진 QA 대응 계획(Task1+Task2) 전체 완료.** 콘텐츠 기반 자동 디워핑(3단계)은 계획대로 조건부 보류 유지 — 밝기/회전/수동 오버라이드가 모두 반영된 상태로 재측정해 필요할 때 별도 계획.
+
+### ✅ HEIC/HEIF 입력 지원 추가 (Phase1-5 LOW 보류 항목 해소)
+
+- `python-dev-expert`가 신규 `app/ingest/loader.py`(`load_image_bgr`) 구현: 확장자가 `.heic`/`.heif`면 pillow-heif로 디코딩(EXIF Orientation 보정 포함)하고, 그 외는 기존과 동일하게 `cv2.imread`로 읽는다. `app/gui/main_window.py`의 재처리 진입점 3곳과 `app/gui/worker.py`의 배치 처리 진입점이 중복 호출하던 `cv2.imread(str(path))`를 이 함수로 통일. "실패 시 예외 없이 `None` 반환"이라는 기존 `cv2.imread` 관례를 그대로 계약으로 유지.
+- `code-reviewer`가 검토해 HIGH 1건 발견: `_load_heif_as_bgr`가 `except OSError:`만 잡고 있어, 손상되거나 잘린(truncated) HEIC 파일에 대해 pillow-heif의 C 디코더가 `image.load()` 시점에 `OSError`의 서브클래스가 아닌 순수 `ValueError`("Unexpected end of file: ...")를 던지면 그대로 전파됨 — `app/gui/main_window.py`의 세 진입점이 `load_image_bgr` 호출을 try/except 없이 직접 사용하고 있어(기존 `cv2.imread`가 절대 예외를 던지지 않는다는 불변식을 믿고 작성됨) Qt 슬롯 밖까지 예외가 새어나갈 수 있는 문제. iCloud "저장 공간 최적화" placeholder 파일이나 동기화 중 파일 접근 등 실사용 시나리오로 재현 가능. `python-dev-expert`가 `except (OSError, ValueError, EOFError):`로 범위를 넓혀 수정하고, sips로 생성한 정상 HEIC를 70% 지점에서 잘라 만든 손상 파일로 수정 전(예외 전파)/후(`None` 반환) 차이를 직접 재현 확인. `tests/ingest/test_loader.py` 신규 추가(정상 디코딩, 파일 없음, 손상 HEIC 회귀, 비-HEIF 확장자는 여전히 `cv2.imread` 경로 사용).
+- 최종 검증: `tests/ingest/`, `tests/gui/test_perspective_correction.py` → 16 passed. `ruff check .` → 통과. 전체 스위트도 회귀 없음(진행 중 확인).
 
 ## 다음 진행 방식
 

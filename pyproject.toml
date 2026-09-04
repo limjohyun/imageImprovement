@@ -43,6 +43,9 @@ dependencies = [
     "typing-extensions==4.16.0",
     "matplotlib==3.11.1",
     "scipy==1.18.1",
+    # 아이폰 기본 카메라 저장 포맷(HEIC/HEIF) 입력 지원용. OpenCV가 네이티브
+    # 디코딩을 지원하지 않아 app/ingest/loader.py에서 별도 경로로 사용한다.
+    "pillow-heif==1.6.0",
 ]
 
 [project.optional-dependencies]
