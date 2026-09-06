@@ -79,6 +79,35 @@ def test_assemble_pdf_rejects_missing_file(tmp_path):
         assemble_pdf([existing, missing], tmp_path / "output.pdf")
 
 
+def test_assemble_pdf_rejects_directory_path(tmp_path):
+    """존재하지만 파일이 아닌 경로(디렉터리 등)는 미존재 경로와 다른 메시지로 드러나야 한다."""
+    existing = _make_single_page_pdf(tmp_path / "a.pdf", "PAGE-A")
+    directory_path = tmp_path / "not_a_file"
+    directory_path.mkdir()
+
+    with pytest.raises(FileNotFoundError, match="파일이 아닙니다"):
+        assemble_pdf([existing, directory_path], tmp_path / "output.pdf")
+
+
+def test_assemble_pdf_does_not_create_output_dir_on_validation_failure(tmp_path):
+    """루프 중간 검증 실패(0페이지 PDF 등) 시 출력 디렉터리가 미리 생성돼 남으면 안 된다."""
+    empty_pdf_path = tmp_path / "empty.pdf"
+    empty_pdf_path.write_bytes(
+        b"%PDF-1.4\n"
+        b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
+        b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n"
+        b"trailer\n<< /Size 3 /Root 1 0 R >>\n"
+        b"%%EOF\n"
+    )
+    output_dir = tmp_path / "brand_new_output_dir"
+    output_pdf = output_dir / "output.pdf"
+
+    with pytest.raises(ValueError):
+        assemble_pdf([empty_pdf_path], output_pdf)
+
+    assert not output_dir.exists()
+
+
 def test_assemble_pdf_rejects_zero_page_pdf(tmp_path):
     """페이지가 0개인 PDF가 섞여 있으면 명확한 예외로 드러나야 한다.
 

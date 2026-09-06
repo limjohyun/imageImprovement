@@ -247,10 +247,24 @@ def make_text_photo(
     seed: int = DEFAULT_SEED,
     lines: list[str] | None = None,
     font_path: Path | None = None,
+    max_jitter_ratio: float = 0.07,
+    noise_sigma: float = 6.0,
+    downsample_scale: float = 0.5,
 ) -> SyntheticPhoto:
-    """스마트폰으로 삐딱하게 찍은 저화질 텍스트 문서 사진 fixture를 생성한다."""
+    """스마트폰으로 삐딱하게 찍은 저화질 텍스트 문서 사진 fixture를 생성한다.
+
+    `max_jitter_ratio`/`noise_sigma`/`downsample_scale`은 `_photograph()`의 왜곡
+    강도를 그대로 노출한 것이다 — 기본 왜곡 강도로는 차이가 잘 드러나지 않는
+    검증(예: 전/후 OCR 인식률 비교)을 위해 더 가혹한 값을 넘길 수 있게 한다.
+    """
     document, text = _render_text_document(lines, font_path=font_path)
-    photo, corners = _photograph(document, seed=seed)
+    photo, corners = _photograph(
+        document,
+        seed=seed,
+        max_jitter_ratio=max_jitter_ratio,
+        noise_sigma=noise_sigma,
+        downsample_scale=downsample_scale,
+    )
     return SyntheticPhoto(photo=photo, ground_truth=document, corners=corners, text=text)
 
 

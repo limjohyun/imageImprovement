@@ -35,8 +35,14 @@ DEFAULT_DPI = 300
 
 
 class MissingExternalToolError(RuntimeError):
-    """OCR/PDF 생성에 필요한 외부 프로그램(Tesseract/Ghostscript/qpdf 등)이 없거나
-    설정(언어팩 등)이 잘못됐을 때 발생시킨다. 조용히 삼키지 않고 원인을 드러낸다."""
+    """OCR/PDF 생성에 필요한 외부 프로그램(Tesseract, qpdf 등)이 없거나 설정(언어팩 등)이
+    잘못됐을 때 발생시킨다. 조용히 삼키지 않고 원인을 드러낸다.
+
+    단, Ghostscript 부재는 이 예외로 드러나지 않는다 — `ocrmypdf.ocr()`을 기본값인
+    `output_type="auto"`로 호출하면 Ghostscript가 없어도 예외 없이 PDF/A 변환만 건너뛰고
+    일반 PDF로 조용히 degrade한다(직접 확인함). 투명 텍스트 레이어 자체는 정상 생성되므로
+    TXT-2 수용 기준(검색·복사 가능한 PDF)은 그대로 충족되며, 잃는 것은 PDF/A 아카이빙
+    포맷뿐이다. PDF/A 자체가 요구사항이 아니므로 여기서는 이 degrade를 그대로 허용한다."""
 
 
 @dataclass

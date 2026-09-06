@@ -17,7 +17,7 @@ import cv2
 import pytest
 
 from app.preprocess.pipeline import PreprocessConfig, run_pipeline
-from tests.fixtures.synthetic import _photograph, _render_text_document
+from tests.fixtures.synthetic import make_text_photo
 
 pytesseract = pytest.importorskip("pytesseract")
 
@@ -31,12 +31,10 @@ def _similarity(candidate: str, expected: str) -> float:
 @pytest.mark.skipif(not _TESSERACT_AVAILABLE, reason="tesseract 바이너리가 PATH에 없습니다.")
 def test_preprocessing_pipeline_improves_ocr_accuracy():
     """저해상도+노이즈+원근왜곡 촬영본을 전처리하면 OCR 인식률이 원본 대비 향상돼야 한다."""
-    document, text = _render_text_document()
-    # 기본 fixture(make_text_photo)보다 더 가혹하게 왜곡해야 raw OCR과의 격차가
+    # 기본 fixture(make_text_photo() 기본값)보다 더 가혹하게 왜곡해야 raw OCR과의 격차가
     # 안정적으로 드러난다(기본 왜곡 강도는 tesseract가 이미 꽤 잘 처리해 차이가 작음).
-    photo, corners = _photograph(
-        document, noise_sigma=12.0, downsample_scale=0.28, max_jitter_ratio=0.07
-    )
+    fixture = make_text_photo(noise_sigma=12.0, downsample_scale=0.28, max_jitter_ratio=0.07)
+    photo, corners, text = fixture.photo, fixture.corners, fixture.text
 
     raw_text = pytesseract.image_to_string(cv2.cvtColor(photo, cv2.COLOR_BGR2GRAY))
 

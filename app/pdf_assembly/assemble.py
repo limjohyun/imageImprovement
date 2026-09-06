@@ -30,11 +30,10 @@ def assemble_pdf(page_pdf_paths: Sequence[str | Path], output_pdf: str | Path) -
 
     resolved_paths = [Path(p) for p in page_pdf_paths]
     for path in resolved_paths:
-        if not path.is_file():
+        if not path.exists():
             raise FileNotFoundError(f"PDF 파일을 찾을 수 없습니다: {path}")
-
-    output_pdf = Path(output_pdf)
-    output_pdf.parent.mkdir(parents=True, exist_ok=True)
+        if not path.is_file():
+            raise FileNotFoundError(f"PDF 파일이 아닙니다(디렉터리 등일 수 있음): {path}")
 
     merged = pymupdf.open()
     try:
@@ -43,6 +42,10 @@ def assemble_pdf(page_pdf_paths: Sequence[str | Path], output_pdf: str | Path) -
                 if page_doc.page_count == 0:
                     raise ValueError(f"페이지가 없는 PDF입니다: {path}")
                 merged.insert_pdf(page_doc)
+        # 모든 입력 검증(존재/페이지 수)이 끝난 뒤에야 출력 디렉터리를 만든다 — 검증
+        # 중간에 예외가 나도 빈 출력 디렉터리가 남지 않게 하기 위함이다.
+        output_pdf = Path(output_pdf)
+        output_pdf.parent.mkdir(parents=True, exist_ok=True)
         merged.save(output_pdf)
     finally:
         merged.close()

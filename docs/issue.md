@@ -5,20 +5,22 @@
 
 ## Phase1-2 (공통 전처리 파이프라인)
 
-- [ ] **[스타일]** `tests/preprocess/test_ocr_improvement.py`가 `tests.fixtures.synthetic`의
-  private 함수(`_photograph`, `_render_text_document`)를 직접 import해서 쓴다. 의도(기본
-  fixture보다 가혹한 왜곡 강도를 커스터마이즈)는 정당하지만, 캡슐화 관례상 `synthetic.py`에
-  파라미터를 받는 공개 헬퍼를 하나 추가해 정리하는 게 깔끔하다.
+- [x] **[스타일]** ~~`tests/preprocess/test_ocr_improvement.py`가 `tests.fixtures.synthetic`의
+  private 함수(`_photograph`, `_render_text_document`)를 직접 import해서 쓴다.~~
+  → `synthetic.py`의 `make_text_photo()`에 `max_jitter_ratio`/`noise_sigma`/`downsample_scale`
+  키워드 인자를 추가해 왜곡 강도를 공개적으로 노출했고(기본값은 기존과 동일, 하위 호환),
+  테스트 파일이 private 함수 대신 이 public 헬퍼를 쓰도록 변경해 해소됨.
   (파일: `tests/preprocess/test_ocr_improvement.py`, `tests/fixtures/synthetic.py`)
 
 ## Phase1-3 (텍스트 OCR 처리기)
 
-- [ ] **[문서 정합성]** `build_searchable_pdf`의 `MissingExternalToolError` 처리가 "Ghostscript
-  없으면 명확히 드러난다"는 의도로 작성됐지만, 실제로는 `ocrmypdf.ocr()`의 기본
-  `output_type='auto'`가 Ghostscript 부재 시 예외 없이 일반 PDF로 조용히 degrade된다(PDF/A
-  변환만 건너뜀). 텍스트 레이어가 있는 PDF 자체는 정상 생성되므로 TXT-2 기능은 충족하지만,
-  주석/독스트링의 "명확히 드러남" 주장과 실제 동작이 다르다. 필요하면 `output_type`을
-  명시적으로 지정하거나 독스트링을 실제 동작에 맞게 수정.
+- [x] **[문서 정합성]** ~~`build_searchable_pdf`의 `MissingExternalToolError` 처리가 "Ghostscript
+  없으면 명확히 드러난다"는 의도로 작성됐지만, 실제로는 예외 없이 일반 PDF로 조용히
+  degrade된다.~~
+  → 실제 동작(Ghostscript 부재 시 `output_type='auto'`가 예외 없이 PDF/A 변환만 건너뛰고
+  조용히 일반 PDF로 degrade됨, 텍스트 레이어는 정상 생성되어 TXT-2는 충족)을 code-reviewer가
+  직접 재현 검증했고, `MissingExternalToolError` docstring을 그 실제 동작에 맞게 수정해
+  해소됨. 코드 동작 자체는 변경하지 않음(새 하드 디펜던시를 만들지 않기 위한 의도적 선택).
   (파일: `app/processors/text.py`)
 - [x] **[중복]** ~~`process_image()`가 `extract_text()`와 `build_searchable_pdf()`를 순서대로
   호출하는데, 두 함수 모두 내부에서 각각 `_require_tesseract()`를 실행해 약간의 중복이 있다~~
@@ -28,11 +30,14 @@
 
 ## Phase1-4 (PDF 조립 최소 구현)
 
-- [ ] **[사소]** `assemble_pdf`에서 `output_pdf.parent.mkdir(...)`이 각 입력 PDF의 페이지 수
+- [x] **[사소]** ~~`assemble_pdf`에서 `output_pdf.parent.mkdir(...)`이 각 입력 PDF의 페이지 수
   검증(루프 안쪽)보다 먼저 실행돼, 루프 중간에 `ValueError`(0페이지 PDF 등)가 나도 출력
-  디렉터리는 이미 생성된 채로 남는다. 데이터 손상은 아니고 빈 디렉터리가 남는 부작용 수준.
-  (파일: `app/pdf_assembly/assemble.py`)
-- [ ] **[사소]** 존재하지 않는 경로와 "파일이 아닌 경로"(디렉터리 등)가 `path.is_file()`
-  검사 하나로 뭉뚱그려져 동일한 `FileNotFoundError` 메시지("PDF 파일을 찾을 수 없습니다")를
-  받는다. PRD 요구 시나리오(미존재 경로)는 충족하지만 디버깅 시 약간 혼동 소지.
-  (파일: `app/pdf_assembly/assemble.py`)
+  디렉터리는 이미 생성된 채로 남는다.~~
+  → `mkdir` 호출을 페이지 병합/검증이 모두 끝난 뒤 `merged.save()` 직전으로 이동해 해소됨.
+  회귀 테스트 `test_assemble_pdf_does_not_create_output_dir_on_validation_failure` 추가.
+  (파일: `app/pdf_assembly/assemble.py`, `tests/pdf_assembly/test_assemble.py`)
+- [x] **[사소]** ~~존재하지 않는 경로와 "파일이 아닌 경로"(디렉터리 등)가 `path.is_file()`
+  검사 하나로 뭉뚱그려져 동일한 `FileNotFoundError` 메시지를 받는다.~~
+  → `path.exists()` → `path.is_file()` 순차 검사로 분리해 미존재/디렉터리 케이스에 서로 다른
+  에러 메시지를 내도록 수정. 회귀 테스트 `test_assemble_pdf_rejects_directory_path` 추가.
+  (파일: `app/pdf_assembly/assemble.py`, `tests/pdf_assembly/test_assemble.py`)
