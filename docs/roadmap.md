@@ -307,6 +307,15 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - `code-reviewer`가 검토해 HIGH 1건 발견: `_load_heif_as_bgr`가 `except OSError:`만 잡고 있어, 손상되거나 잘린(truncated) HEIC 파일에 대해 pillow-heif의 C 디코더가 `image.load()` 시점에 `OSError`의 서브클래스가 아닌 순수 `ValueError`("Unexpected end of file: ...")를 던지면 그대로 전파됨 — `app/gui/main_window.py`의 세 진입점이 `load_image_bgr` 호출을 try/except 없이 직접 사용하고 있어(기존 `cv2.imread`가 절대 예외를 던지지 않는다는 불변식을 믿고 작성됨) Qt 슬롯 밖까지 예외가 새어나갈 수 있는 문제. iCloud "저장 공간 최적화" placeholder 파일이나 동기화 중 파일 접근 등 실사용 시나리오로 재현 가능. `python-dev-expert`가 `except (OSError, ValueError, EOFError):`로 범위를 넓혀 수정하고, sips로 생성한 정상 HEIC를 70% 지점에서 잘라 만든 손상 파일로 수정 전(예외 전파)/후(`None` 반환) 차이를 직접 재현 확인. `tests/ingest/test_loader.py` 신규 추가(정상 디코딩, 파일 없음, 손상 HEIC 회귀, 비-HEIF 확장자는 여전히 `cv2.imread` 경로 사용).
 - 최종 검증: `tests/ingest/`, `tests/gui/test_perspective_correction.py` → 16 passed. `ruff check .` → 통과. 전체 스위트도 회귀 없음(진행 중 확인).
 
+### 🔍 오선+TAB 병기 악보 SCORE 오분류 조사 — 수정 보류(알려진 한계로 확정)
+
+- 실사진 QA로 사용자가 제공한 아이패드 화면 촬영 사진 4장(우쿨렐레 TAB 편곡보 "아로하", 오선 5줄+TAB 4줄 병기)으로 전체 파이프라인(`load_image_bgr` → `run_pipeline` → `classify_document_type`)을 실제로 돌려 이전에 "별도 로드맵 항목 없이 보류"로만 기록돼 있던 이슈를 재현·원인 특정. 원근보정/deskew/조명보정은 4장 모두 정상 동작(시각 확인 완료), 분류만 4장 전부 TEXT로 오판(정답 SCORE).
+- 근본 원인: `_horizontal_line_mask`가 요구하는 연속 실행 길이(`width//4`, 분석 폭 약 5808px 기준 약 1452px)를, 프렛 번호·빔·슬러 표기로 촘촘히 끊긴 오선/TAB 각 줄의 실제 최장 연속 구간(약 550~800px)이 충족하지 못함.
+- `python-dev-expert`가 수정 가능 여부를 조사: (1) 연속 실행 요구를 없애고 "행 전체 비연속 전경 픽셀 비율"로 대체 → 4장 중 2장만 개선, 나머지 2장은 라인 대비가 낮아 여전히 실패. (2) 임계값을 0.5→0.2까지 낮춰야 4장 전부 통과하는데, 임계값 변화에 비단조적으로 반응(과적합 위험). (3) 모폴로지 커널을 `width//4`→`width//20`으로 축소 → 열림 연산은 픽셀을 제거만 하므로 raw 채움 비율의 상한을 넘을 수 없어 무의미.
+- **결정적 근거**: 검증 중 "5~8행 등간격 + 셀 안 텍스트"로 만든 합성 표(table) 이미지가 **현재 코드(수정 전)로도 이미 SCORE로 오탐**됨을 직접 확인 — 표의 격자선은 끊기지 않은 완전한 가로선이라 연속-실행 조건을 이미 통과하고, 등간격+비-선 콘텐츠 조건까지 만족하기 때문. 즉 오선 검출 민감도를 높이는 모든 방향(임계값 완화, 커널 축소)이 정확히 이 신호를 공유하는 표/격자 문서와의 충돌면을 필연적으로 넓힘 — Phase4-4에서 이미 두 차례 재설계 시도가 code-reviewer의 HIGH 회귀 판정으로 무산됐던 표→DIAGRAM 오탐과 근본적으로 동일한 성격의, 순수 기하 휴리스틱으로는 이 Phase 범위에서 안전하게 수렴하지 않는 문제로 결론.
+- **판정: 수정하지 않음.** `app/router/classifier.py`/`tests/router/test_classifier.py` 변경 없음. GUI 수동 유형 오버라이드(Phase4-4에서 이미 구현됨)로 대응 가능한 알려진 한계로 확정 유지.
+- **부가 발견(별도 잠재 이슈, 이번엔 미대응)**: 위 조사 과정에서 등간격 표/격자 문서가 SCORE로도 오탐될 수 있음을 새로 확인함 — 기존에는 표→DIAGRAM 오탐만 알려진 한계로 문서화돼 있었음. 표 계열 문서는 자동분류 신뢰도가 낮으니 실사용 시 GUI 수동 오버라이드 확인을 권장. 필요 시 별도 조사 항목으로 승격 고려.
+
 ## 다음 진행 방식
 
 - 담당 에이전트: 구현은 `python-dev-expert`, 테스트는 `qa-test-engineer`, 진행상황 총괄은 `product-manager`, 커밋 전 검토는 `code-reviewer`.
