@@ -316,6 +316,14 @@ Phase1에 필요한 라이브러리/프로그램을 먼저 설치함. 실제로 
 - **판정: 수정하지 않음.** `app/router/classifier.py`/`tests/router/test_classifier.py` 변경 없음. GUI 수동 유형 오버라이드(Phase4-4에서 이미 구현됨)로 대응 가능한 알려진 한계로 확정 유지.
 - **부가 발견(별도 잠재 이슈, 이번엔 미대응)**: 위 조사 과정에서 등간격 표/격자 문서가 SCORE로도 오탐될 수 있음을 새로 확인함 — 기존에는 표→DIAGRAM 오탐만 알려진 한계로 문서화돼 있었음. 표 계열 문서는 자동분류 신뢰도가 낮으니 실사용 시 GUI 수동 오버라이드 확인을 권장. 필요 시 별도 조사 항목으로 승격 고려.
 
+### 🔧 flaky 테스트 안정화: 페이지 삭제 키보드 단축키 테스트
+
+- `tests/gui/test_page_reorder_delete.py`의 `test_delete_keyboard_shortcut_removes_selected_page`가 시스템 CPU 부하가 높을 때(다른 무거운 ML 추론 테스트와 동시 실행 시) `qtbot.waitUntil(hasFocus, timeout=2000)` 타임아웃으로 간헐적 실패하던 문제. 단독 실행 시엔 항상 정상 통과해 실제 코드 버그가 아님을 먼저 확인.
+- `qa-test-engineer`가 원인 특정: `window.activateWindow()`가 OS/플랫폼 큐에 활성화 요청만 넣고 즉시 반환되는 비동기 호출이라, 그 뒤 `hasFocus` 폴링 대기가 부하 상황에서 취약해짐. 삭제 단축키가 `Qt.ShortcutContext.WidgetShortcut`이라 실제 포커스가 필요함을 먼저 실측 확인해, `hasFocus` 대기 자체를 없애는 대신 근본 원인(활성화 완료를 기다리지 않는 것)을 고치는 방향으로 접근.
+- `code-reviewer`가 검토해 MEDIUM 1건 발견: 1차 수정이 `activateWindow()` 호출 자체를 제거하고 `QTest.qWaitForWindowActive()`만 남겼는데, 이 환경(offscreen/기본 cocoa)에서는 문제없지만 포커스 스틸링 방지 정책이 있는 실제 데스크톱 세션(다른 앱이 foreground일 때 로컬에서 GUI 테스트를 그대로 돌리는 경우)에서는 `activateWindow()` 없이 `show()`만으로 창이 활성화되지 않아 항상 실패할 이론적 위험 지적 — Qt 표준 관용구(`activateWindow()` + `qWaitForWindowActive()` 병행)로 수정. LOW 1건(반환값 미검사)도 `assert`로 함께 반영.
+- 최종 수정: `window.activateWindow()` 유지 + `assert QTest.qWaitForWindowActive(window)`로 활성화 완료를 동기적으로 확정한 뒤, 안전마진으로 `hasFocus` 타임아웃을 2000→8000ms로 상향.
+- 검증: 단독 반복 10회, CPU 풀가동 부하 상황 10회 모두 통과(부하 시 실행시간 약 2배 증가로 부하가 실제로 걸렸음을 확인, 부하 프로세스 정리 완료). 수정 후 `tests/gui/` 전체 스위트 → 69 passed, 1 skipped, 회귀 없음.
+
 ## 다음 진행 방식
 
 - 담당 에이전트: 구현은 `python-dev-expert`, 테스트는 `qa-test-engineer`, 진행상황 총괄은 `product-manager`, 커밋 전 검토는 `code-reviewer`.

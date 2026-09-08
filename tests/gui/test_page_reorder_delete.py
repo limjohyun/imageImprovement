@@ -355,14 +355,23 @@ def test_delete_keyboard_shortcut_removes_selected_page(qtbot, tmp_path, key_nam
     qtbot.addWidget(window)
     window.show()
     qtbot.waitExposed(window)
+    # activateWindow()는 실제 창 활성화 "요청"을 OS/플랫폼 큐에 넣기만 하고 즉시 반환되는
+    # 비동기 호출이다 - 요청 자체는 여전히 필요하다(포커스 스틸링 방지 정책이 있는 실제
+    # 데스크톱 세션에서는 이 호출 없이는 창이 활성화되지 않을 수 있다). 다만 이 요청이
+    # "완료"됐는지를 뒤이은 hasFocus 폴링에만 맡기면 시스템 부하에 취약해지므로,
+    # qWaitForWindowActive()로 활성화 완료를 먼저 동기적으로 확정한다.
     window.activateWindow()
+    assert QTest.qWaitForWindowActive(window)
 
     image_path = tmp_path / "page_a.png"
     image_path.write_bytes(b"fake-image-bytes")
     window._add_image_paths([image_path])
     window.file_list_widget.setCurrentItem(window.file_list_widget.item(0))
     window.file_list_widget.setFocus()
-    qtbot.waitUntil(window.file_list_widget.hasFocus, timeout=2000)
+    # 위에서 창 활성화를 먼저 동기적으로 확정했기 때문에 이 시점의 setFocus()는 보통
+    # 즉시 반영되지만, 다른 무거운 테스트(ML 추론 등)와 동시에 돌아 CPU 경합이 심할 때를
+    # 대비해 타임아웃을 넉넉히 잡아 안정성을 확보한다.
+    qtbot.waitUntil(window.file_list_widget.hasFocus, timeout=8000)
 
     key = getattr(Qt.Key, key_name)
     QTest.keyClick(window.file_list_widget, key)
